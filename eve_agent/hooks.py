@@ -27,6 +27,9 @@ app_license = "mit"
 # include js, css files in header of desk.html
 # app_include_css = "/assets/eve_agent/css/eve_agent.css"
 # app_include_js = "/assets/eve_agent/js/eve_agent.js"
+app_include_js = "/assets/eve_agent/dist/eve_chat.js"
+app_include_css = "/assets/eve_agent/dist/eve_chat.css"
+boot_session = "eve_agent.boot.boot_session"
 
 # include js, css files in header of web template
 # web_include_css = "/assets/eve_agent/css/eve_agent.css"
@@ -84,6 +87,23 @@ app_license = "mit"
 
 after_install = "eve_agent.install.after_install"
 after_migrate = ["eve_agent.install.after_migrate"]
+
+# Keep the data graph current: any synced record change marks it dirty, and a
+# 5-minute job queues one blue/green rebuild (see eve_agent/sync/refresh.py).
+doc_events = {
+	"*": {
+		"on_update": "eve_agent.sync.refresh.mark_dirty",
+		"on_submit": "eve_agent.sync.refresh.mark_dirty",
+		"on_cancel": "eve_agent.sync.refresh.mark_dirty",
+		"on_trash": "eve_agent.sync.refresh.mark_dirty",
+	}
+}
+
+scheduler_events = {
+	"cron": {
+		"*/5 * * * *": ["eve_agent.sync.refresh.refresh_if_dirty"],
+	}
+}
 
 # Uninstallation
 # ------------

@@ -15,6 +15,10 @@ def quote_label(name: str) -> str:
 
 CREATE_INDEX = "CREATE INDEX FOR (n:{label}) ON (n.name)"
 
+# Full-text indexes back the agent's fuzzy entity lookup (find_entity).
+FULLTEXT_LABELS = ("Customer", "Supplier", "Item", "Employee", "Project", "Sales Person", "User", "Lead")
+CREATE_FULLTEXT_INDEX = "CREATE FULLTEXT INDEX FOR (n:{label}) ON (n.name, n.title)"
+
 CREATE_RECORDS = """
 UNWIND $rows AS row
 CREATE (n:{label}:Record)

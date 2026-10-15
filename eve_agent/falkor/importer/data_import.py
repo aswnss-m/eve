@@ -115,4 +115,7 @@ def import_data(client, plan: DataPlan, fetch_records: FetchRecords, fetch_child
 
 	summary.child_edges = loader.create_edges(dq.CREATE_DATA_CHILDREN, child_edges)
 	summary.links = loader.create_edges(dq.CREATE_DATA_LINKS, link_edges)
+	for label in dq.FULLTEXT_LABELS:
+		if loader.loaded.get(label):
+			client.query(dq.CREATE_FULLTEXT_INDEX.format(label=dq.quote_label(label)))
 	return summary

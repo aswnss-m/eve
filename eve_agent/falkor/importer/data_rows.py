@@ -50,11 +50,34 @@ SCALAR_FIELDTYPES = {
 }
 VALUE_FIELDTYPES = SCALAR_FIELDTYPES | LINK_FIELDTYPES | DYNAMIC_FIELDTYPES
 
-STANDARD_FIELDS = ("name", "docstatus", "creation", "modified")
+STANDARD_FIELDS = ("name", "docstatus", "owner", "creation", "modified")
 CHILD_FIELDS = ("parent", "parentfield", "idx")
 MAX_TEXT_LENGTH = 500
 
 _KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_TAG_RE = re.compile(r"<[^>]+>")
+
+# DocTypes outside the module list that the people and knowledge layer needs:
+# who created a record, who commented on it, and who it is assigned to.
+EXTRA_DOCTYPES = ("User", "Comment", "ToDo")
+
+# Only these value fields are copied for the listed DocTypes. Keeps User
+# secrets (reset keys, IPs, API keys) out of the graph.
+FIELD_ALLOWLIST = {
+	"User": ("full_name", "first_name", "last_name", "email", "enabled", "user_type"),
+}
+
+# Long-text fields worth keeping for these DocTypes. HTML tags are stripped.
+TEXT_FIELDS = {
+	"Comment": ("content",),
+	"ToDo": ("description",),
+}
+
+# Record filters, so system noise (Info / Label comments, website users) stays out.
+RECORD_FILTERS = {
+	"Comment": {"comment_type": "Comment"},
+	"User": {"user_type": "System User"},
+}
 
 
 @dataclass
@@ -65,12 +88,14 @@ class DocTypePlan:
 	links: dict[str, str] = field(default_factory=dict)  # fieldname -> target DocType
 	dynamic_links: dict[str, str] = field(default_factory=dict)  # fieldname -> field holding the DocType
 	tables: dict[str, str] = field(default_factory=dict)  # fieldname -> child DocType
+	text_fields: list[str] = field(default_factory=list)  # long text, HTML stripped
+	filters: dict = field(default_factory=dict)
 	is_child: bool = False
 
 	@property
 	def fetch_fields(self) -> list[str]:
 		extra = CHILD_FIELDS if self.is_child else ()
-		return list(dict.fromkeys([*STANDARD_FIELDS, *extra, *self.value_fields]))
+		return list(dict.fromkeys([*STANDARD_FIELDS, *extra, *self.value_fields, *self.text_fields]))
 
 
 @dataclass
@@ -107,10 +132,20 @@ def schema_node_from_export_row(row: list) -> dict:
 
 
 def doctype_plan(node: dict, is_child: bool = False) -> DocTypePlan:
-	plan = DocTypePlan(name=node["name"], title_field=node.get("title_field") or "", is_child=is_child)
+	name = node["name"]
+	plan = DocTypePlan(
+		name=name,
+		title_field=node.get("title_field") or "",
+		text_fields=list(TEXT_FIELDS.get(name, ())),
+		filters=dict(RECORD_FILTERS.get(name, {})),
+		is_child=is_child,
+	)
+	allowlist = FIELD_ALLOWLIST.get(name)
 	for f in node.get("fields", []):
 		fieldname, fieldtype, options = f.get("fieldname"), f.get("fieldtype"), f.get("options")
 		if not fieldname or not _KEY_RE.match(fieldname):
+			continue
+		if allowlist is not None and fieldname not in allowlist:
 			continue
 		if fieldtype in VALUE_FIELDTYPES:
 			plan.value_fields.append(fieldname)
@@ -124,15 +159,15 @@ def doctype_plan(node: dict, is_child: bool = False) -> DocTypePlan:
 
 
 def plan_from_schema(nodes: list[dict], modules=DEFAULT_MODULES, exclude=()) -> DataPlan:
-	"""Pick top-level DocTypes in `modules`, plus the child DocTypes their tables use."""
+	"""Pick top-level DocTypes in `modules` (plus EXTRA_DOCTYPES), and the child DocTypes their tables use."""
 	modules, exclude = set(modules), set(exclude)
 	by_name = {n["name"]: n for n in nodes}
 
-	parents = [
-		doctype_plan(n)
-		for n in sorted(nodes, key=lambda n: n["name"])
-		if n.get("module") in modules and not n.get("is_child") and not n.get("is_single") and n["name"] not in exclude
-	]
+	def wanted(n: dict) -> bool:
+		in_scope = n.get("module") in modules or n["name"] in EXTRA_DOCTYPES
+		return in_scope and not n.get("is_child") and not n.get("is_single") and n["name"] not in exclude
+
+	parents = [doctype_plan(n) for n in sorted(nodes, key=lambda n: n["name"]) if wanted(n)]
 
 	children = {}
 	for parent in parents:
@@ -160,10 +195,17 @@ def coerce(value):
 	return text[:MAX_TEXT_LENGTH]
 
 
+def strip_html(value):
+	if not isinstance(value, str):
+		return value
+	return " ".join(_TAG_RE.sub(" ", value).split())
+
+
 def build_record_row(plan: DocTypePlan, record: dict) -> dict:
 	row = {"doctype": plan.name}
 	for key in plan.fetch_fields:
-		value = coerce(record.get(key))
+		raw = record.get(key)
+		value = coerce(strip_html(raw) if key in plan.text_fields else raw)
 		if value is not None:
 			row[key] = value
 	title = coerce(record.get(plan.title_field)) if plan.title_field else None

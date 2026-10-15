@@ -99,6 +99,22 @@ EMPLOYEE_DOCS = [
 	"Appraisal",
 ]
 
+# Documents whose creator is worth knowing ("who knows this customer?").
+CREATED_DOCS = [
+	*dict.fromkeys(SELLING_DOCS + BUYING_DOCS),
+	"Lead",
+	"Opportunity",
+	"Customer",
+	"Supplier",
+	"Item",
+	"Material Request",
+	"Task",
+	"Comment",
+	"ToDo",
+]
+# System accounts own seeded and automated records; they are not knowledge holders.
+SYSTEM_USERS = ["Administrator", "Guest"]
+
 RULES: tuple[Rule, ...] = (
 	Rule(
 		"drop hub edges",
@@ -235,4 +251,34 @@ RULES: tuple[Rule, ...] = (
 	rename("asset item", "OF_ITEM", ["item_code"], "Item", ["Asset"]),
 	rename("asset category", "IN_CATEGORY", ["asset_category"], "Asset Category", ["Asset", "Item"]),
 	rename("asset records", "FOR_ASSET", ["asset"], "Asset"),
+	# People and knowledge: who created, sold, commented on or was assigned what
+	rename("employee user", "IS_USER", ["user_id"], "User", ["Employee"]),
+	rename("sales person employee", "IS_EMPLOYEE", ["employee"], "Employee", ["Sales Person"]),
+	rename("sales person tree", "CHILD_OF", ["parent_sales_person"], "Sales Person", ["Sales Person"]),
+	Rule(
+		"created by",
+		f"MATCH (r:Record) WHERE r.doctype IN {to_literal(CREATED_DOCS)} "
+		f"AND NOT r.owner IN {to_literal(SYSTEM_USERS)} "
+		"MATCH (u:User {name: r.owner}) CREATE (r)-[:CREATED_BY]->(u) RETURN count(*) AS n",
+	),
+	Rule(
+		"customer managed by",
+		"MATCH (c:Customer)-[:HAS_CHILD]->(st:`Sales Team`)-[:LINKS_TO {field: 'sales_person'}]->(sp:`Sales Person`) "
+		"WITH c, sp, sum(coalesce(st.allocated_percentage, 0)) AS share "
+		"CREATE (c)-[:MANAGED_BY {share: share}]->(sp) RETURN count(*) AS n",
+	),
+	Rule(
+		"sales person sold to",
+		"MATCH (c:Customer)<-[:FOR_CUSTOMER]-(si:`Sales Invoice`)-[:HAS_CHILD]->(st:`Sales Team`)"
+		"-[:LINKS_TO {field: 'sales_person'}]->(sp:`Sales Person`) WHERE si.docstatus = 1 "
+		"WITH sp, c, count(DISTINCT si) AS invoices, sum(coalesce(st.allocated_amount, 0)) AS amount "
+		"CREATE (sp)-[:SOLD_TO {invoices: invoices, amount: amount}]->(c) RETURN count(*) AS n",
+	),
+	rename("todo assignee", "ASSIGNED_TO", ["allocated_to"], "User", ["ToDo"]),
+	rename("todo assigner", "ASSIGNED_BY", ["assigned_by"], "User", ["ToDo"]),
+	Rule(
+		"notes on records",
+		"MATCH (n:Record)-[r:LINKS_TO {field: 'reference_name'}]->(d:Record) WHERE n.doctype IN ['Comment', 'ToDo'] "
+		"CREATE (n)-[:ON]->(d) DELETE r RETURN count(*) AS n",
+	),
 )

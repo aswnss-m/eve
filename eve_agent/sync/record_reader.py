@@ -14,7 +14,13 @@ def _existing_fields(plan: DocTypePlan) -> list[str]:
 def fetch_records(plan: DocTypePlan, limit: int) -> list[dict] | None:
 	if not frappe.db.table_exists(plan.name):
 		return None
-	return frappe.get_all(plan.name, fields=_existing_fields(plan), order_by="modified desc", limit=limit)
+	return frappe.get_all(
+		plan.name,
+		filters=plan.filters or None,
+		fields=_existing_fields(plan),
+		order_by="modified desc",
+		limit=limit,
+	)
 
 
 def fetch_children(plan: DocTypePlan, parent_doctype: str, parentfield: str) -> list[dict]:

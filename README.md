@@ -1,25 +1,58 @@
 ### Eve Agent
 
-ERP graph agent backed by FalkorDB.
+A company-brain chat agent for ERPNext, backed by FalkorDB.
 
-Eve copies a Frappe site's DocType schema and its ERP records into [FalkorDB](https://www.falkordb.com/) (a graph database on Redis). It then adds ERPNext / HRMS business relationships, such as customer → order → delivery → invoice → payment, employee → department, and GL postings, so the data can be explored and queried as a graph.
+Eve copies a Frappe site's DocType schema and its ERP records into [FalkorDB](https://www.falkordb.com/) (a graph database on Redis). It then adds ERPNext / HRMS business relationships (customer → order → delivery → invoice → payment, customer → item, supplier → item, employee → department, GL postings) and a people layer (who created, sells, commented on or was assigned what).
 
-It writes two graphs per site:
+Installing the app also adds **Ask Eve**, a chat panel on every Desk page. Eve answers questions such as "which items sell best?", "who are our best customers?", "who knows Apex Industries best?" or "how did this order come about?" by querying the graph. Every answer shows the Cypher it ran and links to the ERP records behind it, and Eve remembers each user's past conversations in a memory graph.
+
+It keeps three graphs per site:
 
 
 | Graph                                     | Contents                                                                                     |
 | ----------------------------------------- | -------------------------------------------------------------------------------------------- |
 | `<site>_schema` (e.g. `eve_local_schema`) | One node per DocType, with edges for Link fields (`LINKS_TO`) and child tables (`HAS_CHILD`) |
-| `<site>_data` (e.g. `eve_local_data`)     | One node per record and per child-table row, plus the business relationships                 |
+| `<site>_data` / `<site>_data_next`        | One node per record and per child-table row, plus the business and people relationships. Rebuilds alternate between the two names |
+| `<site>_memory`                           | Per-user chat memory: conversations, the records they mention, saved insights                |
 
 
-See **[docs/graph-guide.md](docs/graph-guide.md)** for the graph model and ready-to-run Cypher for sales, buying, stock, accounts, HR, payroll, projects and assets.
+- **[docs/graph-guide.md](docs/graph-guide.md)**: the graph model, and ready-to-run Cypher for sales, buying, stock, accounts, HR, payroll, projects and assets.
+- **[docs/agent-queries.md](docs/agent-queries.md)**: every Cypher query the agent's tools run.
+
+### How it works
+
+```
+Desk (any page) ── Ask Eve panel (Vue 3, reads a server-sent event stream)
+   │ POST /api/method/eve_agent.api.chat.stream (Desk session + CSRF token)
+Frappe web process, started by bench start (eve_agent/api/chat.py + eve_agent/chat/)
+   ├─ LLM through LiteLLM: any provider it supports, one tool loop
+   │    tools: find_entity, top_customers, who_knows, decision_trail, run_cypher, ...
+   │    every ERP read is GRAPH.RO_QUERY on the active data graph
+   └─ writes the turn to <site>_memory
+FalkorDB ← Python sync in Frappe: schema graph, data graph + business rules, blue/green rebuilds
+```
+
+The agent has no other copy of the ERP data. Without FalkorDB it cannot answer anything.
+
+| Tool | What it does in the graph |
+|---|---|
+| `find_entity` | Full-text index lookup of a name the user typed |
+| `top_selling_items`, `top_customers`, `top_suppliers` | Aggregates over `Sales Invoice -CONTAINS→ Item` and `-FOR_CUSTOMER→ Customer` (or the buying side), with optional period filters |
+| `customer_profile`, `item_profile` | 360° view: revenue, items, payments, stock, suppliers, BOMs, monthly sales |
+| `also_bought` | 3-hop cross-sell: `Item ←BOUGHT- Customer -BOUGHT→ Item` |
+| `dormant_customers`, `supplier_risk` | Customers that went quiet; items with only one supplier, weighted by the revenue that depends on them |
+| `who_knows` | People linked to a record through `CREATED_BY`, comments, ToDos, `MANAGED_BY` / `SOLD_TO`, with department and designation from `Employee -IS_USER→ User` |
+| `decision_trail` | Walks the document-flow edges around a document, with each step's creator, comments and ToDos |
+| `explain_connection` | `shortestPath` between any two records |
+| `graph_schema`, `describe_doctype`, `run_cypher` | Schema discovery and a guarded read-only text-to-Cypher fallback |
+| `recall`, `remember_insight` | Read and write the user's memory graph |
 
 ### Requirements
 
 - A Frappe v15 bench. ERPNext and HRMS are optional: Eve syncs whatever DocTypes the site has, and the business rules only add edges for data that exists.
 - A FalkorDB server, **separate from the bench's own Redis** (cache and queue).
 - Docker, or another way to run FalkorDB.
+- An LLM: an Anthropic, OpenAI or Google API key, or any OpenAI-compatible server (Ollama, LiteLLM proxy, vLLM).
 
 
 
@@ -107,7 +140,10 @@ Schema: DocTypes: 926, LINKS_TO: 2804, HAS_CHILD: 463, pruned: 0
 Data: DocTypes with data: 80, records: 12383, child rows: 6465, HAS_CHILD: 6465, LINKS_TO: 76865, business rules applied: 41/50, changes: 45765
 ```
 
-**When it syncs automatically:** the schema sync runs after `install-app` and after every `bench migrate`. The data graph is a full rebuild and only runs when you trigger it. There is no live, per-document sync yet, so resync after loading or changing data.
+**When it syncs automatically:**
+- The schema sync runs after `install-app` and after every `bench migrate`.
+- Saving, submitting, cancelling or deleting a record in a synced module marks the data graph dirty. A scheduled job runs every 5 minutes and queues one rebuild when the graph is dirty, so the site's scheduler must be enabled (`bench --site <site> enable-scheduler`).
+- Rebuilds are blue/green: they alternate between `<site>_data` and `<site>_data_next`. **Active Data Graph** in Eve Agent Settings switches to the new graph only after it is complete, so the agent never reads a half-built graph.
 
 ### 5. Explore
 
@@ -132,6 +168,25 @@ redis-cli -p 6500 GRAPH.RO_QUERY eve_local_data "MATCH (n:Record) RETURN n.docty
 
 
 
+### 6. Chat with Eve
+
+1. **Configure the LLM** in Eve Agent Settings → **Eve Chat Agent**:
+   - **LLM Model**: `provider:model`, e.g. `anthropic:claude-sonnet-5-5` (default), `openai:<model>`, `google:<model>`, or `compatible:<model>` for an OpenAI-compatible server such as Ollama (`compatible:llama3.1`). Other LiteLLM names also work, such as `ollama/llama3.1`. Existing values keep working.
+   - **LLM API Key**: or leave it blank and let LiteLLM read the provider's variable from the environment `bench start` runs in: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or `GEMINI_API_KEY` for Google.
+   - **LLM Base URL**: only for `compatible`, e.g. `http://127.0.0.1:11434/v1` for Ollama.
+   - **Chat Roles**: who sees the Ask Eve button. Defaults to System Manager, Sales Manager and Accounts Manager.
+2. **Start the bench.** The chat runs inside the bench's web process, so `bench start` serves it. There is no second server and no npm command to run.
+3. **Reload the Desk.** Click **Ask Eve** at the bottom right. Each answer lists its steps. Expand a step to see the Cypher, its parameters and the first rows, and click a source chip to open the record.
+
+Settings are read on every question, so a model or key change applies to the next message without a restart.
+
+**Demo data for the people layer.** Seeded sites usually have every record owned by Administrator, so `who_knows` has no one to report. This command adds synthetic sales people, customer assignments, comments and ToDos written as the employee users:
+
+```bash
+bench --site <site> execute eve_agent.demo.seed_people.run
+bench --site <site> sync-data
+```
+
 ### Troubleshooting
 
 
@@ -143,6 +198,11 @@ redis-cli -p 6500 GRAPH.RO_QUERY eve_local_data "MATCH (n:Record) RETURN n.docty
 | Test Connection fails                                     | FalkorDB isn't running or the URL is wrong. Check with `redis-cli -p 6500 PING`                                                                                               |
 | `graph module: no`                                        | The URL points at a plain Redis (e.g. the bench's own Redis), not FalkorDB                                                                                                    |
 | Nodes exist but you see no edges                          | The query returns nodes only. Return paths (`MATCH p = … RETURN p`)                                                                                                           |
+| No Ask Eve button                                         | Your user lacks a **Chat Role**, **Enable Chat** is off, or the Desk was not reloaded after installing                                                                       |
+| Chat answers "You are not allowed to chat with Eve"       | Your roles aren't in **Chat Roles**, or **Enable Chat** is off                                                                                                                 |
+| Chat shows an AuthenticationError or "API key"            | No key for the model's provider. Set **LLM API Key**, or the provider variable (e.g. `ANTHROPIC_API_KEY`) in the environment that runs `bench start`, then restart the bench      |
+| Chat shows "LLM Provider NOT provided" or "model not found" | Check **LLM Model**: the provider prefix must be one LiteLLM knows (`anthropic:`, `openai:`, `google:`, `compatible:`, or a LiteLLM name such as `ollama/llama3.1`)              |
+| Answers mention old data                                  | The scheduler is disabled, or no record has changed since the last rebuild. Use **Sync Data Graph Now**                                                                       |
 
 
 
@@ -155,22 +215,37 @@ Project layout:
 eve_agent/
   falkor/            # FalkorDB layer, no Frappe imports
     connection.py    #   GraphClient over redis-py (GRAPH.QUERY / GRAPH.RO_QUERY)
-    cypher/          #   schema_queries, data_queries, business_rules (ERPNext/HRMS layer)
+    cypher/          #   schema_queries, data_queries, business_rules (ERPNext/HRMS + people layer)
     importer/        #   schema_import, data_rows, data_import, business_layer
-  sync/              # Frappe glue: meta_reader, record_reader, schema_sync, data_sync
-  api/               # whitelisted endpoints used by Eve Agent Settings
+  sync/              # Frappe glue: meta_reader, record_reader, schema_sync, data_sync, refresh (keep current)
+  api/               # whitelisted endpoints: chat (streamed Ask Eve turn), agent (permissions, Settings), settings, sync
+  chat/              # Ask Eve: LLM layer (LiteLLM), turn loop, graph tools, memory, system prompt
+    llm.py           #   provider:model → LiteLLM model
+    loop.py          #   streamed tool-calling loop and its events
+    tools/           #   the graph tools (entities, sales, brain, utility)
+    memory.py        #   per-user memory graph
+  boot.py            # tells the Desk whether to show Ask Eve
+  demo/              # synthetic people-layer data for demos
+  public/dist/       # built chat widget (committed; rebuild with `npm run build`)
   commands.py        # bench sync-schema / sync-data
+frontend/eve_chat/   # chat widget source (Vue 3, streams from the chat endpoint)
+agent/               # retired Node agent server (replaced by eve_agent/chat); not used, safe to delete
 docs/graph-guide.md  # graph model and Cypher recipes
+docs/agent-queries.md # Cypher the agent runs
 ```
+
+After changing `frontend/`, run `npm install && npm run build` in `apps/eve_agent`, and commit `eve_agent/public/dist`.
 
 To add an ERPNext/HRMS relationship, add a rule to `RULES` in `eve_agent/falkor/cypher/business_rules.py` (see the end of the graph guide), then resync the data graph.
 
-The tests are pure Python and don't need a site or FalkorDB:
+The Python tests need no site and no LLM. The chat tests script the model:
 
 ```bash
 cd apps/eve_agent
-../../env/bin/python -m unittest eve_agent.tests.test_falkor_pure eve_agent.tests.test_data_rows eve_agent.tests.test_business_rules
+../../env/bin/python -m unittest eve_agent.tests.test_falkor_pure eve_agent.tests.test_data_rows eve_agent.tests.test_business_rules eve_agent.tests.test_agent_api eve_agent.tests.test_chat
 ```
+
+`test_chat` also runs every tool, and a scripted turn that is remembered, against a live data graph. It skips when FalkorDB or the graph is missing. Set `EVE_TEST_REDIS` / `EVE_TEST_GRAPH` to point it elsewhere, or `EVE_TEST_LIVE=0` to turn it off.
 
 
 
@@ -189,4 +264,11 @@ Pre-commit is configured to use the following tools for checking and formatting 
 - eslint
 - prettier
 - pyupgrade
+
+### Graph Hacks submission
+
+- **Track:** Company Brain (Track 03). The graph also does the work for Agents That Act on Connected Data (multi-hop tools, explainable results) and Agent Memory (the per-user memory graph).
+- **Data:** synthetic. The demo site is filled by a seeding app plus `eve_agent.demo.seed_people`; no real customer or personal data.
+- **Graph model:** [docs/graph-guide.md](docs/graph-guide.md). **Queries the product depends on:** [docs/agent-queries.md](docs/agent-queries.md) and `eve_agent/falkor/cypher/`.
+- **AI assistance:** AI coding assistants (Claude Code) were used to build parts of this project.
 

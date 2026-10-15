@@ -1,11 +1,12 @@
 # Eve graph guide: model and useful Cypher
 
-The data sync writes two graphs to FalkorDB:
+Eve keeps three graphs per site in FalkorDB:
 
 | Graph | Contains | Use it for |
 |---|---|---|
 | `eve_local_schema` | One `DocType` node per DocType, with `LINKS_TO` / `HAS_CHILD` edges between DocTypes | "What links to what?", field lists, finding the path between two DocTypes |
-| `eve_local_data` | One node per ERP record and per child-table row, plus the ERPNext / HRMS business relationships | Questions about real customers, orders, stock, accounts, employees |
+| `eve_local_data` / `eve_local_data_next` | One node per ERP record and per child-table row, plus the ERPNext / HRMS business and people relationships. Rebuilds alternate between the two names; **Active Data Graph** in Eve Agent Settings says which one is current | Questions about real customers, orders, stock, accounts, employees, and who works on them |
+| `eve_local_memory` | The chat agent's per-user conversation memory | What a user asked before, and what they asked Eve to remember |
 
 The names come from the site (`eve.local` → `eve_local_*`) unless they are set in **Eve Agent Settings**.
 
@@ -92,6 +93,36 @@ The attendance totals are also written onto each Employee node: `days_present`, 
 
 ### Projects and assets
 `Task -PART_OF→ Project -FOR_CUSTOMER→ Customer`, `Asset -LOCATED_AT→ Location`, `Asset -OF_ITEM→ Item`, `Asset -IN_CATEGORY→ Asset Category`, and asset records (`Asset Activity`, `Asset Depreciation Schedule`, …) `-FOR_ASSET→ Asset`.
+
+### People and knowledge
+These edges answer "who knows this customer?" and "how was this decided?". Users, user comments (`comment_type = Comment`) and ToDos are loaded even though they live outside the synced modules. Only a short allowlist of User fields is copied (name, full name, email, enabled, user type), so password-reset keys, IPs and API keys never reach the graph. Comment and ToDo text is kept with HTML stripped.
+
+| Relationship | From → To | Built from |
+|---|---|---|
+| `CREATED_BY` | selling and buying documents, Lead, Opportunity, Customer, Supplier, Item, Material Request, Task, Comment, ToDo → User | `owner`, except Administrator and Guest |
+| `IS_USER` | Employee → User | `user_id` |
+| `IS_EMPLOYEE` | Sales Person → Employee | `employee` |
+| `MANAGED_BY` | Customer → Sales Person | the Customer's Sales Team rows, `share` = allocated % |
+| `SOLD_TO` | Sales Person → Customer | Sales Team rows on submitted Sales Invoices, with `invoices` and `amount` |
+| `ON` | Comment, ToDo → any record | `reference_name` |
+| `ASSIGNED_TO` / `ASSIGNED_BY` | ToDo → User | `allocated_to` / `assigned_by` |
+
+Seeded demo sites usually have every record owned by Administrator, so these edges come out empty. `bench --site <site> execute eve_agent.demo.seed_people.run` adds synthetic sales people, customer assignments, comments and ToDos written as the employee users. Run `sync-data` afterwards.
+
+### Keeping the graph current
+Saving, submitting, cancelling or deleting a record in a synced module marks the graph dirty. A job runs every 5 minutes and queues one rebuild when the graph is dirty. Rebuilds are blue/green: they alternate between `<site>_data` and `<site>_data_next`, and **Active Data Graph** in Eve Agent Settings switches only after the new graph is complete, so the agent never reads a half-built graph.
+
+## The memory graph (`<site>_memory`)
+The chat agent keeps one subgraph per user. Records are referenced by `(doctype, name)`, so memory survives data graph rebuilds.
+
+```
+(:User {name})-[:HAD]->(:Conversation {id, title, started_at, updated_at})-[:HAS_MESSAGE]->(:Message {role, text, at})
+(:Message)-[:MENTIONS]->(:EntityRef {key, doctype, name, title})
+(:User)-[:ASKED_ABOUT {count, last_at}]->(:EntityRef)
+(:User)-[:SAVED]->(:Insight {text, at})-[:DERIVED_FROM]->(:EntityRef)
+```
+
+At the start of each chat, the user's most-asked records, recent conversations and saved insights go into the agent's prompt. The `recall` and `remember_insight` tools read and write this graph.
 
 ---
 

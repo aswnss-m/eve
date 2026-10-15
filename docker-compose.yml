@@ -1,0 +1,14 @@
+# FalkorDB for the Eve chat graphs. Frappe and the chat run on the host (bench start).
+#   docker compose up -d
+services:
+  falkordb:
+    image: falkordb/falkordb:v4.22.0
+    ports:
+      - "6500:6379" # Redis protocol (Eve Agent Settings: redis://127.0.0.1:6500)
+      - "4000:3000" # FalkorDB Browser
+    volumes:
+      - falkordb_data:/var/lib/falkordb/data
+    restart: unless-stopped
+
+volumes:
+  falkordb_data:
