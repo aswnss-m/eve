@@ -11,10 +11,21 @@ SETTINGS_DOCTYPE = "Eve Agent Settings"
 DEFAULT_REDIS_URL = "redis://127.0.0.1:6500"
 
 
-def get_graph_client(settings=None) -> GraphClient:
+SYNC_DONE_EVENT = "eve_agent_sync_done"
+
+
+def default_graph_name(suffix: str) -> str:
+	return f"{frappe.local.site.replace('.', '_')}_{suffix}"
+
+
+def get_graph_client(settings=None, graph_name: str | None = None) -> GraphClient:
 	settings = settings or frappe.get_single(SETTINGS_DOCTYPE)
-	graph_name = settings.graph_name or f"{frappe.local.site.replace('.', '_')}_schema"
+	graph_name = graph_name or settings.graph_name or default_graph_name("schema")
 	return GraphClient.from_url(settings.redis_url or DEFAULT_REDIS_URL, graph_name)
+
+
+def publish_sync_done(kind: str, status: str, text: str) -> None:
+	frappe.publish_realtime(SYNC_DONE_EVENT, {"kind": kind, "status": status, "summary": text})
 
 
 def run_schema_sync() -> str:
@@ -32,6 +43,7 @@ def run_schema_sync() -> str:
 		{"last_synced_at": now_datetime(), "last_sync_status": status, "last_sync_summary": text},
 	)
 	frappe.db.commit()
+	publish_sync_done("schema", status, text)
 	return text
 
 

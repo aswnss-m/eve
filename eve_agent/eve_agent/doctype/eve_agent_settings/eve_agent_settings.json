@@ -12,7 +12,16 @@
   "column_break_sync",
   "last_synced_at",
   "last_sync_status",
-  "last_sync_summary"
+  "last_sync_summary",
+  "data_graph_section",
+  "data_graph_name",
+  "max_records_per_doctype",
+  "data_modules",
+  "exclude_doctypes",
+  "column_break_data",
+  "last_data_synced_at",
+  "last_data_sync_status",
+  "last_data_sync_summary"
  ],
  "fields": [
   {
@@ -63,11 +72,65 @@
    "fieldtype": "Small Text",
    "label": "Last Sync Summary",
    "read_only": 1
+  },
+  {
+   "fieldname": "data_graph_section",
+   "fieldtype": "Section Break",
+   "label": "Data Graph"
+  },
+  {
+   "description": "Graph that holds ERP records. Leave blank to use <site>_data.",
+   "fieldname": "data_graph_name",
+   "fieldtype": "Data",
+   "label": "Data Graph Name"
+  },
+  {
+   "default": "5000",
+   "description": "Newest records first. Child rows of loaded records are always included.",
+   "fieldname": "max_records_per_doctype",
+   "fieldtype": "Int",
+   "label": "Max Records per DocType",
+   "non_negative": 1
+  },
+  {
+   "default": "Accounts\nSelling\nBuying\nStock\nSetup\nCRM\nProjects\nAssets\nManufacturing\nHR\nPayroll",
+   "description": "One module per line. Non-single DocTypes in these modules are loaded. Blank means: Accounts, Selling, Buying, Stock, Setup, CRM, Projects, Assets, Manufacturing, HR, Payroll.",
+   "fieldname": "data_modules",
+   "fieldtype": "Small Text",
+   "label": "Modules"
+  },
+  {
+   "description": "One DocType per line.",
+   "fieldname": "exclude_doctypes",
+   "fieldtype": "Small Text",
+   "label": "Exclude DocTypes"
+  },
+  {
+   "fieldname": "column_break_data",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "last_data_synced_at",
+   "fieldtype": "Datetime",
+   "label": "Last Data Synced At",
+   "read_only": 1
+  },
+  {
+   "fieldname": "last_data_sync_status",
+   "fieldtype": "Data",
+   "label": "Last Data Sync Status",
+   "read_only": 1
+  },
+  {
+   "fieldname": "last_data_sync_summary",
+   "fieldtype": "Small Text",
+   "label": "Last Data Sync Summary",
+   "read_only": 1
   }
  ],
  "issingle": 1,
  "links": [],
- "modified": "2026-10-15 00:00:00.000000",
+ "modified": "2026-10-15 18:00:00.000000",
  "modified_by": "Administrator",
  "module": "Eve Agent",
  "name": "Eve Agent Settings",
