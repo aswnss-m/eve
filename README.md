@@ -6,10 +6,12 @@ Eve copies a Frappe site's DocType schema and its ERP records into [FalkorDB](ht
 
 It writes two graphs per site:
 
-| Graph | Contents |
-|---|---|
+
+| Graph                                     | Contents                                                                                     |
+| ----------------------------------------- | -------------------------------------------------------------------------------------------- |
 | `<site>_schema` (e.g. `eve_local_schema`) | One node per DocType, with edges for Link fields (`LINKS_TO`) and child tables (`HAS_CHILD`) |
-| `<site>_data` (e.g. `eve_local_data`) | One node per record and per child-table row, plus the business relationships |
+| `<site>_data` (e.g. `eve_local_data`)     | One node per record and per child-table row, plus the business relationships                 |
+
 
 See **[docs/graph-guide.md](docs/graph-guide.md)** for the graph model and ready-to-run Cypher for sales, buying, stock, accounts, HR, payroll, projects and assets.
 
@@ -18,6 +20,8 @@ See **[docs/graph-guide.md](docs/graph-guide.md)** for the graph model and ready
 - A Frappe v15 bench. ERPNext and HRMS are optional: Eve syncs whatever DocTypes the site has, and the business rules only add edges for data that exists.
 - A FalkorDB server, **separate from the bench's own Redis** (cache and queue).
 - Docker, or another way to run FalkorDB.
+
+
 
 ### 1. Run FalkorDB
 
@@ -39,6 +43,8 @@ redis-cli -p 6500 PING          # PONG
 redis-cli -p 6500 GRAPH.LIST    # empty list on a fresh server
 ```
 
+
+
 ### 2. Install the app
 
 ```bash
@@ -49,6 +55,7 @@ bench --site <site> migrate
 ```
 
 Installing creates:
+
 - the **Eve** workspace in the Desk sidebar
 - the **Eve Agent Settings** page
 - the `bench sync-schema` / `bench sync-data` commands
@@ -59,15 +66,17 @@ It also queues a first schema sync. Restart the bench afterwards (`bench start` 
 
 Open **Eve** workspace → **Eve Agent Settings**.
 
-| Setting | Default | Notes |
-|---|---|---|
-| FalkorDB Redis URL | `redis://127.0.0.1:6500` | The FalkorDB server from step 1. Include a password if you set one: `redis://:pass@host:port` |
-| Graph Name | `<site>_schema` | Schema graph. Leave blank for the default |
-| FalkorDB Browser URL | `http://127.0.0.1:4000` | Used by the "Open FalkorDB Browser" button |
-| Data Graph Name | `<site>_data` | Record graph. Leave blank for the default |
-| Max Records per DocType | 5000 | Newest records first. Child rows of loaded records are always included |
-| Modules | blank | One module per line. Blank means Accounts, Selling, Buying, Stock, Setup, CRM, Projects, Assets, Manufacturing, HR, Payroll |
-| Exclude DocTypes | blank | One DocType per line, e.g. noisy log DocTypes |
+
+| Setting                 | Default                  | Notes                                                                                                                       |
+| ----------------------- | ------------------------ | --------------------------------------------------------------------------------------------------------------------------- |
+| FalkorDB Redis URL      | `redis://127.0.0.1:6500` | The FalkorDB server from step 1. Include a password if you set one: `redis://:pass@host:port`                               |
+| Graph Name              | `<site>_schema`          | Schema graph. Leave blank for the default                                                                                   |
+| FalkorDB Browser URL    | `http://127.0.0.1:4000`  | Used by the "Open FalkorDB Browser" button                                                                                  |
+| Data Graph Name         | `<site>_data`            | Record graph. Leave blank for the default                                                                                   |
+| Max Records per DocType | 5000                     | Newest records first. Child rows of loaded records are always included                                                      |
+| Modules                 | blank                    | One module per line. Blank means Accounts, Selling, Buying, Stock, Setup, CRM, Projects, Assets, Manufacturing, HR, Payroll |
+| Exclude DocTypes        | blank                    | One DocType per line, e.g. noisy log DocTypes                                                                               |
+
 
 Click **Test Connection**. It should report the Redis version, `graph module: yes`, and the graph name.
 
@@ -76,6 +85,7 @@ Click **Test Connection**. It should report the Redis version, `graph module: ye
 The data graph is built **from the schema graph**, so sync the schema first (Full Resync does both in order).
 
 **From the Desk:** Eve Agent Settings → **Sync**:
+
 - **Sync Schema Now**: rebuilds `<site>_schema` from the DocType definitions.
 - **Sync Data Graph Now**: rebuilds `<site>_data` from records, then applies the business rules.
 - **Full Resync**: does the schema sync, then the data sync.
@@ -120,16 +130,22 @@ redis-cli -p 6500 GRAPH.LIST
 redis-cli -p 6500 GRAPH.RO_QUERY eve_local_data "MATCH (n:Record) RETURN n.doctype, count(*) AS c ORDER BY c DESC LIMIT 10"
 ```
 
+
+
 ### Troubleshooting
 
-| Symptom | Cause / fix |
-|---|---|
-| The browser only shows an old or empty graph | The graph list in the browser is out of date. Reload it and pick `<site>_schema` / `<site>_data` from the dropdown. Check with `redis-cli -p 6500 GRAPH.LIST` |
+
+| Symptom                                                   | Cause / fix                                                                                                                                                                   |
+| --------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| The browser only shows an old or empty graph              | The graph list in the browser is out of date. Reload it and pick `<site>_schema` / `<site>_data` from the dropdown. Check with `redis-cli -p 6500 GRAPH.LIST`                 |
 | A Sync button shows "queued" but the status never changes | No worker, or a worker started before the app was installed. Restart the bench. A job that fails in an out-of-date worker can show `ModuleNotFoundError` in the rq job result |
-| Data sync fails with "Schema graph … is empty" | Run **Sync Schema Now** (or `sync-schema`) first |
-| Test Connection fails | FalkorDB isn't running or the URL is wrong. Check with `redis-cli -p 6500 PING` |
-| `graph module: no` | The URL points at a plain Redis (e.g. the bench's own Redis), not FalkorDB |
-| Nodes exist but you see no edges | The query returns nodes only. Return paths (`MATCH p = … RETURN p`) |
+| Data sync fails with "Schema graph … is empty"            | Run **Sync Schema Now** (or `sync-schema`) first                                                                                                                              |
+| Test Connection fails                                     | FalkorDB isn't running or the URL is wrong. Check with `redis-cli -p 6500 PING`                                                                                               |
+| `graph module: no`                                        | The URL points at a plain Redis (e.g. the bench's own Redis), not FalkorDB                                                                                                    |
+| Nodes exist but you see no edges                          | The query returns nodes only. Return paths (`MATCH p = … RETURN p`)                                                                                                           |
+
+
+
 
 ### Development
 
@@ -156,6 +172,8 @@ cd apps/eve_agent
 ../../env/bin/python -m unittest eve_agent.tests.test_falkor_pure eve_agent.tests.test_data_rows eve_agent.tests.test_business_rules
 ```
 
+
+
 ### Contributing
 
 This app uses `pre-commit` for code formatting and linting. Please [install pre-commit](https://pre-commit.com/#installation) and enable it for this repository:
@@ -172,6 +190,3 @@ Pre-commit is configured to use the following tools for checking and formatting 
 - prettier
 - pyupgrade
 
-### License
-
-mit
