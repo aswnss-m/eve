@@ -82,8 +82,8 @@ app_license = "mit"
 # Installation
 # ------------
 
-# before_install = "eve_agent.install.before_install"
-# after_install = "eve_agent.install.after_install"
+after_install = "eve_agent.install.after_install"
+after_migrate = ["eve_agent.install.after_migrate"]
 
 # Uninstallation
 # ------------

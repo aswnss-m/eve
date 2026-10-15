@@ -1,0 +1,90 @@
+{
+ "actions": [],
+ "allow_rename": 0,
+ "creation": "2026-10-15 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "falkordb_section",
+  "redis_url",
+  "graph_name",
+  "browser_url",
+  "column_break_sync",
+  "last_synced_at",
+  "last_sync_status",
+  "last_sync_summary"
+ ],
+ "fields": [
+  {
+   "fieldname": "falkordb_section",
+   "fieldtype": "Section Break",
+   "label": "FalkorDB"
+  },
+  {
+   "default": "redis://127.0.0.1:6500",
+   "description": "Redis instance with the FalkorDB module (separate from the bench's own Redis).",
+   "fieldname": "redis_url",
+   "fieldtype": "Data",
+   "label": "FalkorDB Redis URL",
+   "reqd": 1
+  },
+  {
+   "description": "Leave blank to use <site>_schema.",
+   "fieldname": "graph_name",
+   "fieldtype": "Data",
+   "label": "Graph Name"
+  },
+  {
+   "default": "http://127.0.0.1:4000",
+   "description": "FalkorDB Browser UI. Connect it to the Redis URL above.",
+   "fieldname": "browser_url",
+   "fieldtype": "Data",
+   "label": "FalkorDB Browser URL",
+   "options": "URL"
+  },
+  {
+   "fieldname": "column_break_sync",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "last_synced_at",
+   "fieldtype": "Datetime",
+   "label": "Last Synced At",
+   "read_only": 1
+  },
+  {
+   "fieldname": "last_sync_status",
+   "fieldtype": "Data",
+   "label": "Last Sync Status",
+   "read_only": 1
+  },
+  {
+   "fieldname": "last_sync_summary",
+   "fieldtype": "Small Text",
+   "label": "Last Sync Summary",
+   "read_only": 1
+  }
+ ],
+ "issingle": 1,
+ "links": [],
+ "modified": "2026-10-15 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Eve Agent",
+ "name": "Eve Agent Settings",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 0,
+   "email": 1,
+   "print": 1,
+   "read": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": []
+}
