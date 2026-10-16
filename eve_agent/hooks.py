@@ -88,22 +88,29 @@ boot_session = "eve_agent.boot.boot_session"
 after_install = "eve_agent.install.after_install"
 after_migrate = ["eve_agent.install.after_migrate"]
 
-# Keep the data graph current: any synced record change marks it dirty, and a
-# 5-minute job queues one blue/green rebuild (see eve_agent/sync/refresh.py).
+# Keep the data graph current: every synced record change queues an incremental
+# upsert into the active graph, a 5-minute sweep catches changes made without a
+# hook, and a nightly blue/green rebuild heals the rest (see eve_agent/sync/refresh.py).
 doc_events = {
 	"*": {
-		"on_update": "eve_agent.sync.refresh.mark_dirty",
-		"on_submit": "eve_agent.sync.refresh.mark_dirty",
-		"on_cancel": "eve_agent.sync.refresh.mark_dirty",
-		"on_trash": "eve_agent.sync.refresh.mark_dirty",
+		"on_update": "eve_agent.sync.refresh.queue_record",
+		"on_submit": "eve_agent.sync.refresh.queue_record",
+		"on_cancel": "eve_agent.sync.refresh.queue_record",
+		"on_update_after_submit": "eve_agent.sync.refresh.queue_record",
+		"on_trash": "eve_agent.sync.refresh.queue_record",
+		"after_rename": "eve_agent.sync.refresh.queue_record",
 	}
 }
 
 scheduler_events = {
 	"cron": {
-		"*/5 * * * *": ["eve_agent.sync.refresh.refresh_if_dirty"],
+		"*/5 * * * *": ["eve_agent.sync.refresh.sweep"],
+		"0 2 * * *": ["eve_agent.sync.refresh.nightly_rebuild"],
 	}
 }
+
+# Log Settings can prune the Cypher log.
+default_log_clearing_doctypes = {"Eve Cypher Log": 90}
 
 # Uninstallation
 # ------------

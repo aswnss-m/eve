@@ -276,7 +276,9 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onKeydown));
 	animation-direction: reverse;
 }
 .eve-halo:not(.is-open)::before,
-.eve-halo:not(.is-open)::after {
+.eve-halo:not(.is-open)::after,
+.eve-halo.is-minimized::before,
+.eve-halo.is-minimized::after {
 	animation-play-state: paused;
 }
 @keyframes eve-spin {

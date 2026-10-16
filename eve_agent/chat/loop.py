@@ -30,7 +30,9 @@ def to_model_messages(system: str, ui_messages: list[dict]) -> list[dict]:
 	Tool calls that never finished are left out, as the agent always did.
 	"""
 	messages: list[dict] = [{"role": "system", "content": system}]
-	for message in ui_messages[-MAX_HISTORY:]:
+	history = ui_messages[-MAX_HISTORY:]
+	last_assistant = next((m for m in reversed(history) if m.get("role") == "assistant"), None)
+	for message in history:
 		parts = message.get("parts") or []
 		if message.get("role") == "user":
 			text = " ".join(p.get("text", "") for p in parts if p.get("type") == "text").strip()
@@ -51,6 +53,8 @@ def to_model_messages(system: str, ui_messages: list[dict]) -> list[dict]:
 				messages.append({"role": "assistant", "content": None, "tool_calls": [call]})
 				if part["state"] == "output-available":
 					content: Any = part.get("output") or {}
+					if message is not last_assistant:
+						content = _without_rows(content)
 				else:
 					content = {"error": part.get("errorText") or "The tool failed."}
 				messages.append({"role": "tool", "tool_call_id": call_id, "content": _dumps(content)})
@@ -135,6 +139,17 @@ def run_turn(
 				continue
 			yield {"type": "tool-output", "toolCallId": call["id"], "output": output}
 			messages.append({"role": "tool", "tool_call_id": call["id"], "content": _dumps(output)})
+
+
+def _without_rows(output: dict) -> dict:
+	"""Older tool results keep their sources and query titles but not their rows: replaying
+	up to 100 rows per query for 30 messages bloats every turn and distracts the model."""
+	trimmed = {k: v for k, v in output.items() if k != "queries"}
+	trimmed["queries"] = [
+		{"title": q.get("title"), "cypher": q.get("cypher"), "rows": len(q.get("rows") or [])}
+		for q in output.get("queries") or []
+	]
+	return trimmed
 
 
 def _dumps(value: Any) -> str:

@@ -158,13 +158,18 @@ def doctype_plan(node: dict, is_child: bool = False) -> DocTypePlan:
 	return plan
 
 
-def plan_from_schema(nodes: list[dict], modules=DEFAULT_MODULES, exclude=()) -> DataPlan:
-	"""Pick top-level DocTypes in `modules` (plus EXTRA_DOCTYPES), and the child DocTypes their tables use."""
-	modules, exclude = set(modules), set(exclude)
+def plan_from_schema(nodes: list[dict], modules=DEFAULT_MODULES, exclude=(), extra=()) -> DataPlan:
+	"""Pick top-level DocTypes in `modules` (plus EXTRA_DOCTYPES and the `extra` names from Settings),
+	and the child DocTypes their tables use.
+
+	Each schema node is visited once, so a DocType named in `extra` that a module already
+	covers is simply planned once. `exclude` wins over everything.
+	"""
+	modules, exclude, extra = set(modules), set(exclude), set(extra)
 	by_name = {n["name"]: n for n in nodes}
 
 	def wanted(n: dict) -> bool:
-		in_scope = n.get("module") in modules or n["name"] in EXTRA_DOCTYPES
+		in_scope = n.get("module") in modules or n["name"] in EXTRA_DOCTYPES or n["name"] in extra
 		return in_scope and not n.get("is_child") and not n.get("is_single") and n["name"] not in exclude
 
 	parents = [doctype_plan(n) for n in sorted(nodes, key=lambda n: n["name"]) if wanted(n)]

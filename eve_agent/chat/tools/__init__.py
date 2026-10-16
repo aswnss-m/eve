@@ -1,5 +1,6 @@
 from eve_agent.chat.common import Tool, ToolContext
 from eve_agent.chat.memory import memory_tools
+from eve_agent.chat.tools.actions import action_tools
 from eve_agent.chat.tools.brain import brain_tools
 from eve_agent.chat.tools.entities import entity_tools
 from eve_agent.chat.tools.sales import sales_tools
@@ -12,5 +13,6 @@ def build_tools(ctx: ToolContext) -> list[Tool]:
 		*sales_tools(ctx),
 		*brain_tools(ctx),
 		*utility_tools(ctx),
+		*action_tools(ctx),
 		*memory_tools(ctx),
 	]

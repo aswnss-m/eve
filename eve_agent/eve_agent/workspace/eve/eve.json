@@ -1,6 +1,6 @@
 {
  "charts": [],
- "content": "[{\"id\":\"eveHeader01\",\"type\":\"header\",\"data\":{\"text\":\"<span class=\\\"h4\\\"><b>Eve Graph</b></span>\",\"col\":12}},{\"id\":\"eveShort01\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Graph Browser\",\"col\":3}},{\"id\":\"eveShort02\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Eve Agent Settings\",\"col\":3}},{\"id\":\"eveShort03\",\"type\":\"shortcut\",\"data\":{\"shortcut_name\":\"Error Log\",\"col\":3}}]",
+ "content": "[{\"id\": \"eveHeader01\", \"type\": \"header\", \"data\": {\"text\": \"<span class=\\\"h4\\\"><b>Eve Graph</b></span>\", \"col\": 12}}, {\"id\": \"eveShort01\", \"type\": \"shortcut\", \"data\": {\"shortcut_name\": \"Graph Browser\", \"col\": 3}}, {\"id\": \"eveShort02\", \"type\": \"shortcut\", \"data\": {\"shortcut_name\": \"Eve Agent Settings\", \"col\": 3}}, {\"id\": \"eveShort03\", \"type\": \"shortcut\", \"data\": {\"shortcut_name\": \"Error Log\", \"col\": 3}}, {\"id\": \"eveShort04\", \"type\": \"shortcut\", \"data\": {\"shortcut_name\": \"Cypher Log\", \"col\": 3}}]",
  "creation": "2026-10-15 18:00:00.000000",
  "custom_blocks": [],
  "docstatus": 0,
@@ -12,7 +12,7 @@
  "is_hidden": 0,
  "label": "Eve",
  "links": [],
- "modified": "2026-10-15 18:00:00.000000",
+ "modified": "2026-10-16 10:00:00.000000",
  "modified_by": "Administrator",
  "module": "Eve Agent",
  "name": "Eve",
@@ -44,6 +44,13 @@
    "doc_view": "List",
    "label": "Error Log",
    "link_to": "Error Log",
+   "type": "DocType"
+  },
+  {
+   "color": "Grey",
+   "doc_view": "List",
+   "label": "Cypher Log",
+   "link_to": "Eve Cypher Log",
    "type": "DocType"
   }
  ],

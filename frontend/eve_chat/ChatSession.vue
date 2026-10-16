@@ -55,7 +55,7 @@
 </template>
 
 <script setup>
-import { computed, nextTick, ref, watch } from "vue";
+import { computed, nextTick, provide, ref, watch } from "vue";
 import Composer from "./Composer.vue";
 import Message from "./Message.vue";
 
@@ -239,14 +239,20 @@ watch(
 	{ deep: true }
 );
 
-// Save the chat once a reply is complete, so it survives page reloads.
-watch(status, (value) => {
-	if (value !== "ready") return;
+// Save the chat once a reply is complete (and when a card changes), so it survives page reloads.
+function persist() {
 	try {
 		localStorage.setItem(STORE_KEY, JSON.stringify(messages.value.slice(-40)));
 	} catch {
 		// Storage full or blocked: keep the chat in memory only.
 	}
+}
+provide("evePersist", persist);
+
+watch(status, (value) => {
+	if (value !== "ready") return;
+	persist();
+	composer.value?.focus();
 });
 
 function focus() {

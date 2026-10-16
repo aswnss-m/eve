@@ -18,7 +18,7 @@ class RuleTests(unittest.TestCase):
 
 	def test_rename_reverse(self):
 		rule = rename("x", "CONVERTED_TO", ["lead_name"], "Lead", reverse=True)
-		self.assertIn("CREATE (b)-[:CONVERTED_TO {field: r.field}]->(a)", rule.cypher)
+		self.assertIn("CREATE (b)-[:CONVERTED_TO]->(a)", rule.cypher)  # reverse edges carry no field: see Rule docs
 		self.assertNotIn("a.doctype", rule.cypher)
 
 	def test_flow(self):

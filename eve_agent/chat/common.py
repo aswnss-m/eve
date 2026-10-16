@@ -40,6 +40,10 @@ class ChatConfig:
 	data_as_of: str
 	currency: str
 	company: str
+	# Record writes (eve_agent/chat/tools/actions.py). Off unless Settings say otherwise.
+	allow_create: bool = False
+	allow_update: bool = False
+	write_doctypes: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -69,6 +73,13 @@ class ToolContext:
 	memory: Any  # chat.graph.Graph for the memory graph
 	# Every source cited this turn; memory links the conversation to these.
 	cited: list[dict] = field(default_factory=list)
+	# The user's question and chat, for the Cypher log.
+	question: str = ""
+	chat_id: str = ""
+	# Frappe-side behaviour, injected by api/chat.py so the chat package stays importable without Frappe:
+	# can_write(doctype, "create" | "write") -> bool, and log_cypher(entry) for run_cypher.
+	can_write: Callable[[str, str], bool] | None = None
+	log_cypher: Callable[[dict], None] | None = None
 
 
 @dataclass

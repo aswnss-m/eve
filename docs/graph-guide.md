@@ -413,3 +413,28 @@ Add a rule to `RULES` in `eve_agent/falkor/cypher/business_rules.py`; it runs af
 - `Rule(name, "<cypher> RETURN count(*) AS n")` is for anything else (aggregates, node properties). It must return one count.
 
 Then run **Eve Agent Settings → Sync → Sync Data Graph Now**, or `bench --site eve.local sync-data`. The summary shows how many rules matched something.
+
+
+## Keeping the graph current
+
+The full build (`sync-data`) rebuilds everything. Between rebuilds the **incremental sync** (`eve_agent/sync/refresh.py`, `eve_agent/falkor/importer/incremental.py`) brings single records up to date in the active graph, within seconds of a save:
+
+1. The masters next to the record (customers, items, employees, vouchers...) are captured **before** anything is removed, by following the record's own outgoing edges that carry a `field` property, directly and through its child rows.
+2. The record's child-row nodes and every edge it owns (`LINKS_TO`, `HAS_CHILD`, and forward renames such as `FOR_CUSTOMER`, which keep `{field}`) are deleted. Records that no longer exist in the database are removed with their edges.
+3. The record is `MERGE`d (incoming edges survive) and its child rows, `HAS_CHILD` and `LINKS_TO` edges are recreated.
+4. Every business rule runs in its **scoped** form with `$names` (the records touched) and `$pivots` (the masters from step 1, plus those of the new version, plus the records themselves). Each scoped form is a delete + create pair with the same scope, so it never duplicates an edge:
+   - renames and flows re-derive the record's own named edges;
+   - per-document aggregates (`CONTAINS`, `PAID_BY`, `CONSUMES`, `MANAGED_BY`) are recomputed for the touched documents;
+   - cross-document aggregates (`BOUGHT`, `SUPPLIES`, `SOLD_TO`, `STOCKED_IN`, `POSTED_TO`, `EARNS`, `DEDUCTS`, `TOOK_LEAVE`, `ON_STRUCTURE`) are recomputed for the affected masters: a new or cancelled Sales Invoice recomputes every `BOUGHT` edge of its customer;
+   - the Employee attendance totals are reset and recomputed for the affected employees.
+
+Reverse renames (`CONVERTED_TO`, `QUOTED_AS` from Opportunity, `INSPECTED_BY`) carry no `field` property, because the record that holds the Link is their target, not their source.
+
+A 5-minute sweep queues records whose `modified` moved without a document hook (ERPNext writes invoice status, outstanding amounts, bins and cancelled GL entries with SQL). A nightly full rebuild heals the cases the incremental path cannot see:
+
+- a link whose target was not in the graph when the source was synced (the edge appears when the source is touched again);
+- records that still point at a renamed master (Frappe rewrites those columns without bumping `modified`);
+- raw SQL writes that do not touch `modified`, and `frappe.db.delete`;
+- the `Max Records per DocType` cap, which incremental upserts ignore.
+
+FalkorDB has no multi-statement transactions, so a reader can briefly see a node without its edges while an upsert runs.

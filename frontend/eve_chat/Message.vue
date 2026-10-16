@@ -5,6 +5,7 @@
 		<template v-else>
 			<template v-for="(part, i) in message.parts" :key="i">
 				<div v-if="part.type === 'text' && part.text" class="eve-md" v-html="html(part.text)"></div>
+				<ActionCard v-else-if="isAction(part)" :part="part" @changed="persist" />
 				<ToolStep v-else-if="isTool(part)" :part="part" />
 			</template>
 
@@ -34,7 +35,8 @@
 </template>
 
 <script setup>
-import { computed, onBeforeUnmount, ref, watch } from "vue";
+import { computed, inject, onBeforeUnmount, ref, watch } from "vue";
+import ActionCard from "./ActionCard.vue";
 import ToolStep from "./ToolStep.vue";
 import { renderMarkdown } from "./markdown.js";
 import { doctypeOf, lookupRecords } from "./locate.js";
@@ -45,6 +47,8 @@ const props = defineProps({
 });
 
 const __ = window.__;
+// Saves the chat after a card changes state (ChatSession only saves when a reply ends).
+const persist = inject("evePersist", () => {});
 const copied = ref(false);
 let copiedTimer = null;
 
@@ -64,6 +68,11 @@ const answerText = computed(() =>
 
 function isTool(part) {
 	return part.type.startsWith("tool-") || part.type === "dynamic-tool";
+}
+
+// A record proposal: the tool output carries an action for the user to confirm.
+function isAction(part) {
+	return isTool(part) && part.state === "output-available" && part.output && part.output.action;
 }
 
 const outputs = computed(() =>

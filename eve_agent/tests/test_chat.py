@@ -40,6 +40,8 @@ EXPECTED_TOOLS = {
 	"graph_schema",
 	"describe_doctype",
 	"run_cypher",
+	"record_form",
+	"propose_record",
 	"recall",
 	"remember_insight",
 }
@@ -164,6 +166,28 @@ class HistoryTests(unittest.TestCase):
 		self.assertIn("ACME", messages[3]["content"])
 		self.assertEqual(messages[4], {"role": "assistant", "content": "ACME leads."})
 		self.assertEqual(messages[-1], {"role": "user", "content": "And last year?"})
+
+	def test_older_tool_outputs_lose_their_rows(self):
+		def reply(call_id, rows):
+			return {
+				"role": "assistant",
+				"parts": [
+					{
+						"type": "tool-run_cypher",
+						"toolCallId": call_id,
+						"state": "output-available",
+						"input": {},
+						"output": {"queries": [{"title": "t", "cypher": "MATCH", "rows": rows}], "sources": [{"doctype": "Item", "name": "A"}]},
+					}
+				],
+			}
+
+		history = [reply("old", [{"a": 1}, {"a": 2}]), {"role": "user", "parts": [{"type": "text", "text": "more"}]}, reply("new", [{"a": 3}])]
+		old, new = (m for m in to_model_messages("S", history) if m["role"] == "tool")
+		self.assertIn('"rows": 2', old["content"])
+		self.assertNotIn('"a": 1', old["content"])
+		self.assertIn('"name": "A"', old["content"])
+		self.assertIn('"a": 3', new["content"])
 
 	def test_unfinished_tool_calls_are_left_out(self):
 		history = [
@@ -290,6 +314,21 @@ class ToolTests(unittest.TestCase):
 		self.assertEqual(out["sources"], [{"doctype": "Item", "name": "SDR-1"}])
 		self.assertEqual(out["queries"][0]["rows"][1]["name"], None)
 
+	def test_run_cypher_logs_success_and_failure(self):
+		data = FakeGraph()
+		entries = []
+		ctx = make_ctx(data)
+		ctx.question, ctx.chat_id, ctx.log_cypher = "how many items?", "chat-1", entries.append
+		tool = next(t for t in build_tools(ctx) if t.name == "run_cypher")
+		tool.run(tool.params.model_validate({"cypher": "MATCH (i:Item) RETURN count(i) AS n", "purpose": "count"}))
+		with self.assertRaises(WriteQueryError):
+			tool.run(tool.params.model_validate({"cypher": "MATCH (n) DELETE n", "purpose": "bad"}))
+		self.assertEqual([e["status"] for e in entries], ["Success", "Failed"])
+		self.assertEqual(entries[0]["question"], "how many items?")
+		self.assertEqual(entries[0]["chat_id"], "chat-1")
+		self.assertTrue(entries[0]["cypher"].endswith("LIMIT 200"))
+		self.assertIn("Write clause", entries[1]["error"])
+
 	def test_date_filters_are_validated(self):
 		with self.assertRaises(ValueError):
 			TopCustomersArgs.model_validate({"date_from": "last month"})
@@ -298,6 +337,88 @@ class ToolTests(unittest.TestCase):
 	def test_fulltext_query_strips_operators(self):
 		self.assertEqual(fulltext_query("Acme (Ltd) & Co_1"), "acme* ltd* co* 1*")
 		self.assertEqual(fulltext_query("   "), "")
+
+
+class ActionToolTests(unittest.TestCase):
+	def propose(self, ctx, **values):
+		tool = next(t for t in build_tools(ctx) if t.name == "propose_record")
+		args = {"doctype": "Customer", "values": {"customer_name": "Ashish"}, "summary": "New customer Ashish", **values}
+		return tool.run(tool.params.model_validate(args))
+
+	def writable_ctx(self, **overrides):
+		ctx = make_ctx()
+		ctx.config.allow_create = True
+		ctx.config.write_doctypes = ["Customer", "Sales Invoice"]
+		ctx.can_write = lambda doctype, ptype: True
+		for key, value in overrides.items():
+			setattr(ctx.config, key, value)
+		return ctx
+
+	def test_refused_when_disabled_unlisted_or_forbidden(self):
+		with self.assertRaisesRegex(ValueError, "not allowed to create"):
+			self.propose(make_ctx())
+		with self.assertRaisesRegex(ValueError, "may not write Customer"):
+			self.propose(self.writable_ctx(write_doctypes=["Item"]))
+		ctx = self.writable_ctx()
+		ctx.can_write = lambda doctype, ptype: False
+		with self.assertRaisesRegex(ValueError, "permission"):
+			self.propose(ctx)
+		with self.assertRaisesRegex(ValueError, "drafts"):
+			self.propose(self.writable_ctx(), values={"customer_name": "A", "docstatus": 1})
+		with self.assertRaisesRegex(ValueError, "exact record name"):
+			self.propose(self.writable_ctx(allow_update=True), mode="update")
+
+	def test_pending_action_keeps_child_rows(self):
+		ctx = self.writable_ctx()
+		out = self.propose(
+			ctx,
+			doctype="Sales Invoice",
+			values={"customer": "Ashish", "items": [{"item_code": "SDR-1", "qty": 2}]},
+			summary="Invoice for Ashish",
+		)
+		action = out["action"]
+		self.assertEqual(action["status"], "pending")
+		self.assertEqual(action["kind"], "create")
+		self.assertEqual(action["values"]["items"], [{"item_code": "SDR-1", "qty": 2}])
+		self.assertIn("confirm", out["note"])
+
+	def test_record_form_splits_required_optional_and_tables(self):
+		import json
+
+		schema = FakeGraph("schema")
+		fields = {
+			"Sales Invoice": [
+				{"fieldname": "customer", "fieldtype": "Link", "options": "Customer", "label": "Customer", "reqd": 1},
+				{"fieldname": "naming_series", "fieldtype": "Select", "options": "ACC-", "reqd": 1},
+				{"fieldname": "sb", "fieldtype": "Section Break"},
+				{"fieldname": "status", "fieldtype": "Select", "options": "Draft\nPaid", "label": "Status"},
+				{"fieldname": "items", "fieldtype": "Table", "options": "Sales Invoice Item", "label": "Items"},
+			],
+			"Sales Invoice Item": [
+				{"fieldname": "item_code", "fieldtype": "Link", "options": "Item", "label": "Item", "reqd": 1},
+				{"fieldname": "qty", "fieldtype": "Float", "label": "Qty", "reqd": 1},
+			],
+		}
+		schema.ro = lambda title, cypher, params=None: QueryRun(
+			title=title,
+			cypher=cypher,
+			params=params or {},
+			rows=[{"doctype": params["doctype"], "is_submittable": True, "fields": json.dumps(fields[params["doctype"]])}]
+			if params["doctype"] in fields
+			else [],
+			ms=0,
+		)
+		ctx = make_ctx()
+		ctx.schema = schema
+		tool = next(t for t in build_tools(ctx) if t.name == "record_form")
+		form = tool.run(tool.params.model_validate({"doctype": "Sales Invoice"}))["form"]
+		self.assertTrue(form["is_submittable"])
+		self.assertEqual([f["fieldname"] for f in form["required"]], ["customer"])
+		self.assertEqual(form["required"][0]["options"], "Customer")
+		self.assertEqual(form["optional"][0]["choices"], ["Draft", "Paid"])
+		self.assertEqual(form["tables"][0]["child_doctype"], "Sales Invoice Item")
+		self.assertEqual([f["fieldname"] for f in form["tables"][0]["required"]], ["item_code", "qty"])
+		self.assertFalse(form["writable"])
 
 
 class PlainTests(unittest.TestCase):
