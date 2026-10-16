@@ -103,11 +103,12 @@ Open **Eve** workspace → **Eve Agent Settings**.
 | Setting                 | Default                  | Notes                                                                                                                       |
 | ----------------------- | ------------------------ | --------------------------------------------------------------------------------------------------------------------------- |
 | FalkorDB Redis URL      | `redis://127.0.0.1:6500` | The FalkorDB server from step 1. Include a password if you set one: `redis://:pass@host:port`                               |
-| Graph Name              | `<site>_schema`          | Schema graph. Leave blank for the default                                                                                   |
+| Schema Graph Name       | `<site>_schema`          | Leave blank for the default                                                                                                 |
 | FalkorDB Browser URL    | `http://127.0.0.1:4000`  | Used by the "Open FalkorDB Browser" button                                                                                  |
 | Data Graph Name         | `<site>_data`            | Record graph. Leave blank for the default                                                                                   |
+| Memory Graph Name       | `<site>_memory`          | Per-user chat memory. Leave blank for the default                                                                           |
 | Max Records per DocType | 5000                     | Newest records first. Child rows of loaded records are always included                                                      |
-| Modules                 | blank                    | One module per line. Blank means Accounts, Selling, Buying, Stock, Setup, CRM, Projects, Assets, Manufacturing, HR, Payroll |
+| Modules                 | default list             | Allowlist, one module per line: a single module loads only that module. Blank restores Accounts, Selling, Buying, Stock, Setup, CRM, Projects, Assets, Manufacturing, HR, Payroll. The Module Def list shows every module |
 | Exclude DocTypes        | blank                    | One DocType per line, e.g. noisy log DocTypes                                                                               |
 | Additional DocTypes to Graph | blank               | One DocType per line, for DocTypes outside the modules (custom apps). A DocType a module already covers is synced once      |
 | Incremental Sync        | on                       | Push every saved, submitted, cancelled or deleted record to the active graph within seconds (see "When it syncs")           |
@@ -125,7 +126,7 @@ The data graph is built **from the schema graph**, so sync the schema first (Ful
 - **Sync Data Graph Now**: rebuilds `<site>_data` from records, then applies the business rules.
 - **Full Resync**: does the schema sync, then the data sync.
 
-These run as background jobs on the `long` queue, so a worker must be running. An alert appears when a sync finishes, and the form shows **Last Sync Status / Summary** for both graphs. Failures are written to **Error Log** (also in the Eve workspace).
+These run as background jobs on the `long` queue, so a worker must be running. An alert appears when a sync finishes, and the **Sync Status** section at the bottom of the form shows the last run of each sync. The Eve workspace shows the same three readouts at the top. Failures are written to **Error Log** (also in the Eve workspace).
 
 **From the terminal:** these commands run synchronously and print a summary.
 
@@ -144,7 +145,7 @@ Data: DocTypes with data: 80, records: 12383, child rows: 6465, HAS_CHILD: 6465,
 
 **When it syncs automatically:**
 - The schema sync runs after `install-app` and after every `bench migrate`.
-- **Incrementally, within seconds.** Saving, submitting, cancelling, renaming or deleting a synced record queues it (after the transaction commits), and a job on the `short` queue upserts those records into the active graph: the node, its child rows, its links, and the business relationships around it (a new invoice updates the customer's `BOUGHT` totals; a cancelled one takes them back). Many saves in a row are drained in batches. **Sync Pending Changes Now** on the Settings page queues this by hand; **Last Incremental Sync At / Summary** show the last run.
+- **Incrementally, within seconds.** Saving, submitting, cancelling, renaming or deleting a synced record queues it (after the transaction commits), and a job on the `short` queue upserts those records into the active graph: the node, its child rows, its links, and the business relationships around it (a new invoice updates the customer's `BOUGHT` totals; a cancelled one takes them back). Many saves in a row are drained in batches. **Sync Pending Changes Now** on the Settings page queues this by hand; **Incremental Synced At / Summary** under Sync Status show the last run.
 - **Every 5 minutes**, a sweep queues records whose `modified` changed without a hook (ERPNext updates invoice status, outstanding amounts, bins and cancelled GL entries with direct SQL), so those catch up at the next sweep. The site's scheduler must be enabled (`bench --site <site> enable-scheduler`).
 - **Nightly at 02:00**, a full rebuild heals what the incremental path cannot see: links to records that were not in the graph yet, documents still pointing at a renamed master, raw SQL writes, and the `Max Records per DocType` cap (incremental upserts ignore it).
 - Rebuilds are blue/green: they alternate between `<site>_data` and `<site>_data_next`. Records that change while a rebuild runs are applied to the new graph before **Active Data Graph** in Eve Agent Settings switches to it, so the agent never reads a half-built or stale graph.

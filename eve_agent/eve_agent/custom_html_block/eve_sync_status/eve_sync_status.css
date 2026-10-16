@@ -1,0 +1,6 @@
+.eve-sync { padding: var(--padding-md) 0; }
+.eve-sync-title { font-size: var(--text-md); font-weight: 600; margin-bottom: var(--margin-sm); }
+.eve-sync-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: var(--margin-md); }
+.eve-sync-card { border: 1px solid var(--border-color); border-radius: var(--border-radius-md); padding: var(--padding-sm) var(--padding-md); }
+.eve-sync-card .head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; }
+.eve-sync-card .summary { font-size: var(--text-sm); color: var(--text-muted); white-space: pre-wrap; }

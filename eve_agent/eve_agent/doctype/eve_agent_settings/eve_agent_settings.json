@@ -7,40 +7,43 @@
  "field_order": [
   "falkordb_section",
   "redis_url",
-  "graph_name",
   "browser_url",
   "column_break_sync",
-  "last_synced_at",
-  "last_sync_status",
-  "last_sync_summary",
-  "data_graph_section",
+  "graph_name",
   "data_graph_name",
-  "max_records_per_doctype",
-  "data_modules",
-  "exclude_doctypes",
-  "extra_doctypes",
-  "incremental_sync",
-  "column_break_data",
-  "last_data_synced_at",
-  "last_data_sync_status",
-  "last_data_sync_summary",
-  "active_data_graph",
-  "last_incremental_sync_at",
-  "last_incremental_summary",
+  "memory_graph_name",
   "agent_section",
   "enable_chat",
-  "shortcut",
   "chat_roles",
+  "shortcut",
   "column_break_agent",
   "llm_model",
   "llm_api_key",
   "llm_base_url",
-  "memory_graph_name",
   "actions_section",
   "allow_create",
   "allow_update",
   "column_break_actions",
-  "write_doctypes"
+  "write_doctypes",
+  "data_graph_section",
+  "data_modules",
+  "exclude_doctypes",
+  "extra_doctypes",
+  "column_break_data",
+  "max_records_per_doctype",
+  "incremental_sync",
+  "status_section",
+  "last_synced_at",
+  "last_sync_status",
+  "last_sync_summary",
+  "column_break_status_data",
+  "active_data_graph",
+  "last_data_synced_at",
+  "last_data_sync_status",
+  "last_data_sync_summary",
+  "column_break_status_incr",
+  "last_incremental_sync_at",
+  "last_incremental_summary"
  ],
  "fields": [
   {
@@ -50,21 +53,15 @@
   },
   {
    "default": "redis://127.0.0.1:6500",
-   "description": "Redis instance with the FalkorDB module (separate from the bench's own Redis).",
+   "description": "The FalkorDB server, not the bench's own Redis. With a password: redis://:pass@host:port.",
    "fieldname": "redis_url",
    "fieldtype": "Data",
    "label": "FalkorDB Redis URL",
    "reqd": 1
   },
   {
-   "description": "Leave blank to use <site>_schema.",
-   "fieldname": "graph_name",
-   "fieldtype": "Data",
-   "label": "Graph Name"
-  },
-  {
    "default": "http://127.0.0.1:4000",
-   "description": "FalkorDB Browser UI. Connect it to the Redis URL above.",
+   "description": "Used by the Open FalkorDB Browser button. Point the browser at the Redis URL above.",
    "fieldname": "browser_url",
    "fieldtype": "Data",
    "label": "FalkorDB Browser URL",
@@ -75,108 +72,22 @@
    "fieldtype": "Column Break"
   },
   {
-   "fieldname": "last_synced_at",
-   "fieldtype": "Datetime",
-   "label": "Last Synced At",
-   "read_only": 1
-  },
-  {
-   "fieldname": "last_sync_status",
+   "description": "Blank: <site>_schema.",
+   "fieldname": "graph_name",
    "fieldtype": "Data",
-   "label": "Last Sync Status",
-   "read_only": 1
+   "label": "Schema Graph Name"
   },
   {
-   "fieldname": "last_sync_summary",
-   "fieldtype": "Small Text",
-   "label": "Last Sync Summary",
-   "read_only": 1
-  },
-  {
-   "fieldname": "data_graph_section",
-   "fieldtype": "Section Break",
-   "label": "Data Graph"
-  },
-  {
-   "description": "Graph that holds ERP records. Leave blank to use <site>_data.",
+   "description": "Blank: <site>_data. Rebuilds alternate between this name and <name>_next.",
    "fieldname": "data_graph_name",
    "fieldtype": "Data",
    "label": "Data Graph Name"
   },
   {
-   "default": "5000",
-   "description": "Newest records first. Child rows of loaded records are always included.",
-   "fieldname": "max_records_per_doctype",
-   "fieldtype": "Int",
-   "label": "Max Records per DocType",
-   "non_negative": 1
-  },
-  {
-   "default": "Accounts\nSelling\nBuying\nStock\nSetup\nCRM\nProjects\nAssets\nManufacturing\nHR\nPayroll",
-   "description": "One module per line. Non-single DocTypes in these modules are loaded. Blank means: Accounts, Selling, Buying, Stock, Setup, CRM, Projects, Assets, Manufacturing, HR, Payroll.",
-   "fieldname": "data_modules",
-   "fieldtype": "Small Text",
-   "label": "Modules"
-  },
-  {
-   "description": "One DocType per line.",
-   "fieldname": "exclude_doctypes",
-   "fieldtype": "Small Text",
-   "label": "Exclude DocTypes"
-  },
-  {
-   "description": "One DocType per line. Adds DocTypes outside the modules above, e.g. from custom apps. A DocType the modules already cover is synced once; listing it again changes nothing.",
-   "fieldname": "extra_doctypes",
-   "fieldtype": "Small Text",
-   "label": "Additional DocTypes to Graph"
-  },
-  {
-   "default": "1",
-   "description": "Push each saved, submitted, cancelled or deleted record to the active graph within seconds. The nightly full rebuild still runs.",
-   "fieldname": "incremental_sync",
-   "fieldtype": "Check",
-   "label": "Incremental Sync"
-  },
-  {
-   "fieldname": "column_break_data",
-   "fieldtype": "Column Break"
-  },
-  {
-   "fieldname": "last_data_synced_at",
-   "fieldtype": "Datetime",
-   "label": "Last Data Synced At",
-   "read_only": 1
-  },
-  {
-   "fieldname": "last_data_sync_status",
+   "description": "Per-user chat memory. Blank: <site>_memory.",
+   "fieldname": "memory_graph_name",
    "fieldtype": "Data",
-   "label": "Last Data Sync Status",
-   "read_only": 1
-  },
-  {
-   "fieldname": "last_data_sync_summary",
-   "fieldtype": "Small Text",
-   "label": "Last Data Sync Summary",
-   "read_only": 1
-  },
-  {
-   "description": "Graph the agent reads. Rebuilds alternate between <data graph> and <data graph>_next, then switch here.",
-   "fieldname": "active_data_graph",
-   "fieldtype": "Data",
-   "label": "Active Data Graph",
-   "read_only": 1
-  },
-  {
-   "fieldname": "last_incremental_sync_at",
-   "fieldtype": "Datetime",
-   "label": "Last Incremental Sync At",
-   "read_only": 1
-  },
-  {
-   "fieldname": "last_incremental_summary",
-   "fieldtype": "Small Text",
-   "label": "Last Incremental Summary",
-   "read_only": 1
+   "label": "Memory Graph Name"
   },
   {
    "fieldname": "agent_section",
@@ -185,10 +96,17 @@
   },
   {
    "default": "1",
-   "description": "Show the Ask Eve chat button in the Desk for the roles below.",
+   "description": "Shows the Ask Eve button in the Desk for the roles below.",
    "fieldname": "enable_chat",
    "fieldtype": "Check",
    "label": "Enable Chat"
+  },
+  {
+   "default": "System Manager\nSales Manager\nAccounts Manager",
+   "description": "One role per line. A user with any of these roles sees Ask Eve.",
+   "fieldname": "chat_roles",
+   "fieldtype": "Small Text",
+   "label": "Chat Roles"
   },
   {
    "default": "Cmd+E",
@@ -198,25 +116,18 @@
    "label": "Keyboard Shortcut"
   },
   {
-   "default": "System Manager\nSales Manager\nAccounts Manager",
-   "description": "One role per line. Users with any of these roles can chat with Eve.",
-   "fieldname": "chat_roles",
-   "fieldtype": "Small Text",
-   "label": "Chat Roles"
-  },
-  {
    "fieldname": "column_break_agent",
    "fieldtype": "Column Break"
   },
   {
    "default": "anthropic:claude-sonnet-5-5",
-   "description": "provider:model. Providers: anthropic, openai, google, compatible (any OpenAI-compatible server, e.g. Ollama or LiteLLM, using the Base URL).",
+   "description": "provider:model. Providers: anthropic, openai, google, compatible (an OpenAI-compatible server such as Ollama or LiteLLM; set the Base URL).",
    "fieldname": "llm_model",
    "fieldtype": "Data",
    "label": "LLM Model"
   },
   {
-   "description": "Leave blank to use the provider's key from the environment that runs bench (e.g. ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY).",
+   "description": "Blank: the provider's variable from the environment bench runs in (ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY).",
    "fieldname": "llm_api_key",
    "fieldtype": "Password",
    "label": "LLM API Key"
@@ -228,26 +139,20 @@
    "label": "LLM Base URL"
   },
   {
-   "description": "Conversation memory graph. Leave blank to use <site>_memory.",
-   "fieldname": "memory_graph_name",
-   "fieldtype": "Data",
-   "label": "Memory Graph Name"
-  },
-  {
    "fieldname": "actions_section",
    "fieldtype": "Section Break",
    "label": "Eve Actions"
   },
   {
    "default": "0",
-   "description": "Eve may propose new records; the user confirms each one in the chat before it is inserted. Submittable DocTypes are created as drafts, Eve never submits.",
+   "description": "Eve proposes the record and the user confirms it in the chat before it is inserted. Submittable DocTypes are saved as drafts; Eve never submits.",
    "fieldname": "allow_create",
    "fieldtype": "Check",
    "label": "Allow Eve to create records"
   },
   {
    "default": "0",
-   "description": "Same confirmation flow, for draft (unsubmitted) documents only.",
+   "description": "Same confirmation flow, for drafts only.",
    "fieldname": "allow_update",
    "fieldtype": "Check",
    "label": "Allow Eve to update records"
@@ -258,15 +163,127 @@
   },
   {
    "default": "Customer\nSupplier\nLead\nContact\nQuotation\nSales Order\nSales Invoice\nPurchase Order\nMaterial Request\nStock Entry",
-   "description": "One DocType per line. Submittable DocTypes are created as drafts; Eve never submits. The user's own Frappe permissions still apply.",
+   "description": "One DocType per line. Eve refuses every other DocType. The user's own Frappe permissions still apply.",
    "fieldname": "write_doctypes",
    "fieldtype": "Small Text",
    "label": "DocTypes Eve may write"
+  },
+  {
+   "fieldname": "data_graph_section",
+   "fieldtype": "Section Break",
+   "label": "Synced Records"
+  },
+  {
+   "default": "Accounts\nSelling\nBuying\nStock\nSetup\nCRM\nProjects\nAssets\nManufacturing\nHR\nPayroll",
+   "description": "One module per line. Only DocTypes in these modules are loaded, so a list with one module loads that module alone. Blank restores the default list. See the <a href=\"/app/module-def\">Module Def</a> list for every module.",
+   "fieldname": "data_modules",
+   "fieldtype": "Small Text",
+   "label": "Modules"
+  },
+  {
+   "description": "One DocType per line, e.g. noisy log DocTypes.",
+   "fieldname": "exclude_doctypes",
+   "fieldtype": "Small Text",
+   "label": "Exclude DocTypes"
+  },
+  {
+   "description": "One DocType per line, for DocTypes outside the modules above, e.g. from custom apps. A DocType a module already covers is synced once.",
+   "fieldname": "extra_doctypes",
+   "fieldtype": "Small Text",
+   "label": "Additional DocTypes to Graph"
+  },
+  {
+   "fieldname": "column_break_data",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "5000",
+   "description": "Newest records first. Child rows of loaded records are always included.",
+   "fieldname": "max_records_per_doctype",
+   "fieldtype": "Int",
+   "label": "Max Records per DocType",
+   "non_negative": 1
+  },
+  {
+   "default": "1",
+   "description": "Pushes each saved, submitted, cancelled or deleted record to the active graph within seconds. The nightly full rebuild still runs.",
+   "fieldname": "incremental_sync",
+   "fieldtype": "Check",
+   "label": "Incremental Sync"
+  },
+  {
+   "collapsible": 1,
+   "fieldname": "status_section",
+   "fieldtype": "Section Break",
+   "label": "Sync Status"
+  },
+  {
+   "fieldname": "last_synced_at",
+   "fieldtype": "Datetime",
+   "label": "Schema Synced At",
+   "read_only": 1
+  },
+  {
+   "fieldname": "last_sync_status",
+   "fieldtype": "Data",
+   "label": "Schema Sync Status",
+   "read_only": 1
+  },
+  {
+   "fieldname": "last_sync_summary",
+   "fieldtype": "Small Text",
+   "label": "Schema Sync Summary",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_status_data",
+   "fieldtype": "Column Break"
+  },
+  {
+   "description": "The graph Eve reads. A rebuild switches it only after the new graph is complete.",
+   "fieldname": "active_data_graph",
+   "fieldtype": "Data",
+   "label": "Active Data Graph",
+   "read_only": 1
+  },
+  {
+   "fieldname": "last_data_synced_at",
+   "fieldtype": "Datetime",
+   "label": "Data Graph Rebuilt At",
+   "read_only": 1
+  },
+  {
+   "fieldname": "last_data_sync_status",
+   "fieldtype": "Data",
+   "label": "Rebuild Status",
+   "read_only": 1
+  },
+  {
+   "fieldname": "last_data_sync_summary",
+   "fieldtype": "Small Text",
+   "label": "Rebuild Summary",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_status_incr",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "last_incremental_sync_at",
+   "fieldtype": "Datetime",
+   "label": "Incremental Synced At",
+   "read_only": 1
+  },
+  {
+   "fieldname": "last_incremental_summary",
+   "fieldtype": "Small Text",
+   "label": "Incremental Summary",
+   "read_only": 1
   }
  ],
  "issingle": 1,
  "links": [],
- "modified": "2026-10-16 10:00:00.000000",
+ "modified": "2026-10-16 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "Eve Agent",
  "name": "Eve Agent Settings",
