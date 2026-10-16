@@ -12,7 +12,7 @@
     "vite": "7.3.7"
   },
   "scripts": {
-    "build": "vite build --config frontend/vite.config.mjs",
+    "build": "vite build --config frontend/vite.config.mjs && touch eve_agent/hooks.py",
     "watch": "vite build --watch --config frontend/vite.config.mjs"
   }
 }

@@ -10,9 +10,7 @@
 			:aria-label="launcherTitle"
 			@click="show"
 		>
-			<svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true">
-				<path d="M12 3.5c.5 4.3 2.2 6 6.5 6.5-4.3.5-6 2.2-6.5 6.5-.5-4.3-2.2-6-6.5-6.5 4.3-.5 6-2.2 6.5-6.5z" fill="currentColor" />
-			</svg>
+			<Mascot />
 			<span class="eve-launcher-label">{{ __("Ask Eve") }}</span>
 		</button>
 
@@ -25,7 +23,7 @@
 		>
 			<div class="eve-header" :title="minimized ? __('Expand') : ''" @click="onHeaderClick">
 				<div class="eve-title">
-					<span class="eve-mark" aria-hidden="true">✦</span>
+					<Mascot plain :busy="busy" />
 					<div>
 						<div class="eve-name">Eve</div>
 						<div class="eve-sub">{{ __("Answers from your ERP graph") }}</div>
@@ -72,7 +70,7 @@
 					</button>
 				</div>
 			</div>
-			<ChatSession v-if="chatId" ref="session" :key="chatId" :chat-id="chatId" />
+			<ChatSession v-if="chatId" ref="session" :key="chatId" :chat-id="chatId" @busy="busy = $event" />
 		</section>
 	</div>
 </template>
@@ -80,6 +78,7 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
 import ChatSession from "./ChatSession.vue";
+import Mascot from "./Mascot.vue";
 
 const CHAT_KEY = `eve_chat:id:${frappe.session.user}`;
 const DEFAULT_SHORTCUT = "Cmd+E";
@@ -92,6 +91,7 @@ const __ = window.__;
 const IS_MAC = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
 const open = ref(false);
 const minimized = ref(false);
+const busy = ref(false);
 const session = ref(null);
 const chatId = ref(read(CHAT_KEY) || newId());
 const combo = parseShortcut(props.shortcut || DEFAULT_SHORTCUT);
@@ -186,6 +186,7 @@ function close() {
 function newChat() {
 	write(`eve_chat:messages:${frappe.session.user}:${chatId.value}`, null);
 	chatId.value = newId();
+	busy.value = false;
 	nextTick(() => session.value?.focus());
 }
 
@@ -306,29 +307,38 @@ onBeforeUnmount(() => {
 	right: 24px;
 	bottom: 24px;
 	z-index: 1036;
-	height: 52px;
-	padding: 0 20px 0 16px;
+	height: 60px;
+	padding: 0;
 	display: inline-flex;
 	align-items: center;
-	gap: 10px;
 	border-radius: 999px;
-	font-size: 14px;
-	font-weight: 600;
 	border: 1px solid var(--border-color, #d1d8dd);
 	background: var(--fg-color, #fff);
-	color: var(--primary, var(--blue-500, #2490ef));
 	box-shadow: var(--shadow-lg, 0 6px 24px rgba(0, 0, 0, 0.18));
 	cursor: pointer;
 	transition: transform 0.2s cubic-bezier(0.2, 0.8, 0.2, 1), box-shadow 0.2s ease;
 }
-.eve-launcher svg {
-	display: block;
-	flex: none;
+.eve-launcher .eve-mascot {
+	width: 58px;
+	height: 58px;
 }
+/* "Ask Eve" slides out of the circle on hover and keyboard focus. */
 .eve-launcher-label {
 	display: block;
-	line-height: 1;
+	max-width: 0;
+	opacity: 0;
+	overflow: hidden;
 	white-space: nowrap;
+	font-size: 14px;
+	font-weight: 600;
+	color: var(--primary, var(--blue-500, #2490ef));
+	transition: max-width 0.5s cubic-bezier(0.2, 0.8, 0.2, 1), padding 0.5s cubic-bezier(0.2, 0.8, 0.2, 1), opacity 0.35s ease;
+}
+.eve-launcher:hover .eve-launcher-label,
+.eve-launcher:focus-visible .eve-launcher-label {
+	max-width: 120px;
+	opacity: 1;
+	padding: 0 20px 0 8px;
 }
 .eve-launcher:hover {
 	transform: translateY(-2px) scale(1.04);
@@ -403,10 +413,9 @@ onBeforeUnmount(() => {
 	align-items: center;
 	gap: 10px;
 }
-.eve-mark {
-	color: var(--primary, var(--blue-500, #2490ef));
-	font-size: 18px;
-	line-height: 1;
+.eve-title .eve-mascot {
+	width: 40px;
+	height: 40px;
 }
 .eve-name {
 	font-weight: 600;
@@ -482,7 +491,8 @@ onBeforeUnmount(() => {
 	.eve-panel.is-open,
 	.eve-halo,
 	.eve-halo.is-open,
-	.eve-launcher {
+	.eve-launcher,
+	.eve-launcher-label {
 		transition: none;
 	}
 }

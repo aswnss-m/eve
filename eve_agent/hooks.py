@@ -33,7 +33,9 @@ import os as _os
 def _versioned(asset: str) -> str:
 	"""Desk includes these paths verbatim and serves them with a 12-hour cache header, so a
 	rebuilt widget would stay invisible: the file's mtime makes the URL change with every build.
-	Hooks are cached per site; run `bench clear-cache` after `npm run build`."""
+	The value is fixed when this module is imported, so the web process must restart after a build:
+	`npm run build` touches this file for the dev server's reloader; production needs `bench restart`
+	and, since hooks are cached per site outside developer mode, `bench clear-cache`."""
 	path = _os.path.join(_os.path.dirname(__file__), "public", asset)
 	try:
 		return f"/assets/eve_agent/{asset}?v={int(_os.path.getmtime(path))}"
