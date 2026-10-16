@@ -78,11 +78,38 @@ def utility_tools(ctx: ToolContext) -> list[Tool]:
 			row["fields"] = _describe_fields(row.get("fields"))
 		return result(ctx, [run], [])
 
+	def log(purpose: str, limited: str, run: QueryRun | None, error: str | None, started: float) -> None:
+		"""Keep every model-written Cypher (see eve_agent/chat/cypher_log.py), when a logger is wired in."""
+		if ctx.log_cypher is None:
+			return
+		ctx.log_cypher(
+			{
+				"question": ctx.question,
+				"purpose": purpose,
+				"cypher": limited,
+				"params": {},
+				"row_count": len(run.rows) if run else 0,
+				"ms": run.ms if run else round((time.monotonic() - started) * 1000),
+				"status": "Failed" if error else "Success",
+				"error": error,
+				"user": ctx.user.user,
+				"chat_id": ctx.chat_id,
+				"model": ctx.config.model,
+				"data_graph": ctx.data.name,
+			}
+		)
+
 	def run_cypher(args: RunCypherArgs) -> dict:
-		assert_read_only(args.cypher)
 		has_limit = re.search(r"\bLIMIT\b", args.cypher, re.IGNORECASE)
 		limited = args.cypher if has_limit else f"{args.cypher.strip()} LIMIT {ROW_LIMIT}"
-		run = ctx.data.ro(args.purpose, limited)
+		started = time.monotonic()
+		try:
+			assert_read_only(args.cypher)
+			run = ctx.data.ro(args.purpose, limited)
+		except Exception as exc:
+			log(args.purpose, limited, None, str(exc), started)
+			raise
+		log(args.purpose, limited, run, None, started)
 		truncated = len(run.rows) > MODEL_ROW_LIMIT
 		run.rows = run.rows[:MODEL_ROW_LIMIT]
 		sources = [

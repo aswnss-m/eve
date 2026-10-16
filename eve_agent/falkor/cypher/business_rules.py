@@ -14,8 +14,19 @@ below run after the load, in order, and add named relationships:
 Every rule returns a single count. Rules for DocTypes with no data simply
 return 0, so the list can cover modules that a site does not use yet.
 See docs/graph-guide.md for the resulting model and example queries.
+
+Each rule also carries `scoped` statements for the incremental sync
+(eve_agent/falkor/importer/incremental.py). They take two parameters:
+  $names   the records that were just upserted or deleted
+  $pivots  master records next to them (customers, items, employees...),
+           captured before and after the upsert
+and are a delete + create pair with the same scope, so re-running them never
+duplicates an edge. Edges that carry a `field` property (LINKS_TO, HAS_CHILD
+and forward renames) are owned by their source record and are removed by the
+upsert itself; every other edge is only ever deleted and recreated here.
 """
 
+import re
 from dataclasses import dataclass
 
 from eve_agent.falkor.cypher.data_queries import quote_label
@@ -45,29 +56,79 @@ HUB_DOCTYPES = (
 class Rule:
 	name: str
 	cypher: str
+	scoped: tuple[str, ...] = ()
+
+
+_CLAUSE_RE = re.compile(r"\s(WITH|CREATE|SET|DELETE|RETURN)\s")
+
+
+def scope(cypher: str, cond: str) -> str:
+	"""Add `cond` to the first WHERE of `cypher`, or insert a WHERE before its first WITH/CREATE/SET."""
+	if " WHERE " in cypher:
+		return cypher.replace(" WHERE ", f" WHERE {cond} AND ", 1)
+	match = _CLAUSE_RE.search(cypher)
+	if not match:
+		raise ValueError(f"Cannot scope: {cypher}")
+	return f"{cypher[: match.start()]} WHERE {cond}{cypher[match.start():]}"
 
 
 def rename(name: str, new_type: str, fields: list[str], dst: str, src: list[str] | None = None, reverse=False) -> Rule:
-	"""Replace LINKS_TO edges (by field name) to `dst` with `new_type`. reverse=True flips the direction."""
+	"""Replace LINKS_TO edges (by field name) to `dst` with `new_type`. reverse=True flips the direction.
+
+	Forward edges keep `{field}` so the upsert can tell they belong to their source record.
+	Reverse edges leave `a` (the record holding the Link) as the target, so they carry no
+	`field` and are instead deleted and recreated by the scoped statements.
+	"""
 	where = f"r.field IN {to_literal(fields)}"
 	if src:
 		where += f" AND a.doctype IN {to_literal(src)}"
-	pattern = "(b)-[:{t} {{field: r.field}}]->(a)" if reverse else "(a)-[:{t} {{field: r.field}}]->(b)"
-	return Rule(
-		name,
+	pattern = "(b)-[:{t}]->(a)" if reverse else "(a)-[:{t} {{field: r.field}}]->(b)"
+	cypher = (
 		f"MATCH (a:Record)-[r:LINKS_TO]->(b:{quote_label(dst)}) WHERE {where} "
-		f"CREATE {pattern.format(t=new_type)} DELETE r RETURN count(*) AS n",
+		f"CREATE {pattern.format(t=new_type)} DELETE r RETURN count(*) AS n"
 	)
+	scoped = [scope(cypher, "a.name IN $names")]
+	if reverse:
+		scoped.insert(
+			0,
+			f"MATCH (b:{quote_label(dst)})-[r:{new_type}]->(a:Record) WHERE a.name IN $names "
+			"DELETE r RETURN count(*) AS n",
+		)
+	return Rule(name, cypher, tuple(scoped))
 
 
 def flow(name: str, new_type: str, prev: str, row: str, field: str, nxt: str) -> Rule:
 	"""(prev)-[:new_type]->(nxt) when any `row` of `nxt` links to `prev` through `field`."""
-	return Rule(
-		name,
+	cypher = (
 		f"MATCH (n:{quote_label(nxt)})-[:HAS_CHILD]->(:{quote_label(row)})"
 		f"-[:LINKS_TO {{field: '{field}'}}]->(p:{quote_label(prev)}) "
-		f"WITH DISTINCT p, n CREATE (p)-[:{new_type}]->(n) RETURN count(*) AS n",
+		f"WITH DISTINCT p, n CREATE (p)-[:{new_type}]->(n) RETURN count(*) AS n"
 	)
+	return Rule(
+		name,
+		cypher,
+		(
+			f"MATCH (p:{quote_label(prev)})-[r:{new_type}]->(n:{quote_label(nxt)}) WHERE n.name IN $names "
+			"DELETE r RETURN count(*) AS n",
+			scope(cypher, "n.name IN $names"),
+		),
+	)
+
+
+def derived(name: str, cypher: str, edge: str, cond: str, edge_var: str = "r") -> Rule:
+	"""A rule that creates field-less edges. `edge` is the pattern to delete first, binding the edge as
+	`edge_var` and the scope variable used in `cond`, e.g. "(c:Customer)-[r:BOUGHT]->(:Item)" with
+	"c.name IN $pivots". `cond` must also hold in `cypher`, whose first MATCH binds the same variable."""
+	return Rule(
+		name,
+		cypher,
+		(f"MATCH {edge} WHERE {cond} DELETE {edge_var} RETURN count(*) AS n", scope(cypher, cond)),
+	)
+
+
+def local(name: str, cypher: str, cond: str) -> Rule:
+	"""A rule that only deletes or rewrites what it matches; scoping the match is enough."""
+	return Rule(name, cypher, (scope(cypher, cond),))
 
 
 SELLING_DOCS = ["Quotation", "Sales Order", "Delivery Note", "Sales Invoice", "Payment Entry", "Project"]
@@ -115,11 +176,23 @@ CREATED_DOCS = [
 # System accounts own seeded and automated records; they are not knowledge holders.
 SYSTEM_USERS = ["Administrator", "Guest"]
 
+ATTENDANCE_SUMMARY = (
+	"MATCH (a:Attendance)-[:FOR_EMPLOYEE]->(e:Employee) WHERE a.docstatus = 1 "
+	"WITH e, sum(CASE WHEN a.status = 'Present' THEN 1 ELSE 0 END) AS present, "
+	"sum(CASE WHEN a.status = 'Absent' THEN 1 ELSE 0 END) AS absent, "
+	"sum(CASE WHEN a.status = 'On Leave' THEN 1 ELSE 0 END) AS on_leave, "
+	"sum(CASE WHEN a.status = 'Half Day' THEN 1 ELSE 0 END) AS half_day, "
+	"sum(CASE WHEN a.status = 'Work From Home' THEN 1 ELSE 0 END) AS wfh "
+	"SET e.days_present = present, e.days_absent = absent, e.days_on_leave = on_leave, "
+	"e.days_half_day = half_day, e.days_wfh = wfh RETURN count(*) AS n"
+)
+
 RULES: tuple[Rule, ...] = (
-	Rule(
+	local(
 		"drop hub edges",
-		f"MATCH ()-[r:LINKS_TO]->(h:Record) WHERE h.doctype IN {to_literal(list(HUB_DOCTYPES))} "
+		f"MATCH (a:Record)-[r:LINKS_TO]->(h:Record) WHERE h.doctype IN {to_literal(list(HUB_DOCTYPES))} "
 		"DELETE r RETURN count(*) AS n",
+		"a.name IN $names",
 	),
 	# Parties
 	rename("customer docs", "FOR_CUSTOMER", ["customer", "party_name", "party"], "Customer", SELLING_DOCS),
@@ -144,56 +217,70 @@ RULES: tuple[Rule, ...] = (
 	flow("receipt billed", "BILLED_BY", "Purchase Receipt", "Purchase Invoice Item", "purchase_receipt", "Purchase Invoice"),
 	rename("receipt inspected", "INSPECTED_BY", ["reference_name"], "Purchase Receipt", ["Quality Inspection"], reverse=True),
 	# Payments: (invoice or order)-[:PAID_BY {amount}]->(Payment Entry)
-	Rule(
+	derived(
 		"payments",
 		"MATCH (pe:`Payment Entry`)-[:HAS_CHILD]->(ref:`Payment Entry Reference`)-[:LINKS_TO {field: 'reference_name'}]->(doc) "
 		"WITH pe, doc, sum(ref.allocated_amount) AS amount "
 		"CREATE (doc)-[:PAID_BY {amount: amount}]->(pe) RETURN count(*) AS n",
+		"()-[r:PAID_BY]->(pe:`Payment Entry`)",
+		"pe.name IN $names",
 	),
 	# Items on documents: (doc)-[:CONTAINS {qty, amount, rate}]->(Item), one edge per doc and item
-	Rule(
+	derived(
 		"document items",
 		"MATCH (d:Record)-[:HAS_CHILD]->(row)-[:LINKS_TO {field: 'item_code'}]->(i:Item) "
 		f"WHERE d.doctype IN {to_literal(ITEM_DOCS)} "
 		"WITH d, i, sum(coalesce(row.qty, 0)) AS qty, sum(coalesce(row.amount, 0)) AS amount, "
 		"avg(coalesce(row.rate, row.basic_rate, row.valuation_rate, 0)) AS rate "
 		"CREATE (d)-[:CONTAINS {qty: qty, amount: amount, rate: rate}]->(i) RETURN count(*) AS n",
+		"(d:Record)-[r:CONTAINS]->(:Item)",
+		"d.name IN $names",
 	),
-	Rule(
+	derived(
 		"customer bought",
 		"MATCH (c:Customer)<-[:FOR_CUSTOMER]-(si:`Sales Invoice`)-[k:CONTAINS]->(i:Item) WHERE si.docstatus = 1 "
 		"WITH c, i, sum(k.qty) AS qty, sum(k.amount) AS amount, count(DISTINCT si) AS invoices "
 		"CREATE (c)-[:BOUGHT {qty: qty, amount: amount, invoices: invoices}]->(i) RETURN count(*) AS n",
+		"(c:Customer)-[r:BOUGHT]->(:Item)",
+		"c.name IN $pivots",
 	),
-	Rule(
+	derived(
 		"supplier supplies",
 		"MATCH (s:Supplier)<-[:FROM_SUPPLIER]-(pi:`Purchase Invoice`)-[k:CONTAINS]->(i:Item) WHERE pi.docstatus = 1 "
 		"WITH s, i, sum(k.qty) AS qty, sum(k.amount) AS amount, count(DISTINCT pi) AS invoices "
 		"CREATE (s)-[:SUPPLIES {qty: qty, amount: amount, invoices: invoices}]->(i) RETURN count(*) AS n",
+		"(s:Supplier)-[r:SUPPLIES]->(:Item)",
+		"s.name IN $pivots",
 	),
 	# Stock and manufacturing
 	rename("item group", "IN_GROUP", ["item_group"], "Item Group", ["Item"]),
 	rename("item group tree", "CHILD_OF", ["parent_item_group"], "Item Group", ["Item Group"]),
 	rename("warehouse tree", "CHILD_OF", ["parent_warehouse"], "Warehouse", ["Warehouse"]),
-	Rule(
+	derived(
 		"stock levels",
 		"MATCH (b:Bin)-[:LINKS_TO {field: 'item_code'}]->(i:Item), (b)-[:LINKS_TO {field: 'warehouse'}]->(w:Warehouse) "
 		"CREATE (i)-[:STOCKED_IN {actual_qty: b.actual_qty, projected_qty: b.projected_qty, "
 		"reserved_qty: b.reserved_qty, ordered_qty: b.ordered_qty}]->(w) RETURN count(*) AS n",
+		"(i:Item)-[r:STOCKED_IN]->(:Warehouse)",
+		"i.name IN $pivots",
 	),
 	rename("bom output", "PRODUCES", ["item"], "Item", ["BOM"]),
-	Rule(
+	derived(
 		"bom inputs",
 		"MATCH (bom:BOM)-[:HAS_CHILD]->(row:`BOM Item`)-[:LINKS_TO {field: 'item_code'}]->(i:Item) "
 		"WITH bom, i, sum(row.qty) AS qty CREATE (bom)-[:CONSUMES {qty: qty}]->(i) RETURN count(*) AS n",
+		"(bom:BOM)-[r:CONSUMES]->(:Item)",
+		"bom.name IN $names",
 	),
 	# Accounting: (voucher)-[:POSTED_TO {debit, credit}]->(Account) from non-cancelled GL Entries
-	Rule(
+	derived(
 		"gl postings",
 		"MATCH (g:`GL Entry`)-[:LINKS_TO {field: 'voucher_no'}]->(v), (g)-[:LINKS_TO {field: 'account'}]->(a:Account) "
 		"WHERE coalesce(g.is_cancelled, 0) = 0 "
 		"WITH v, a, sum(coalesce(g.debit, 0)) AS debit, sum(coalesce(g.credit, 0)) AS credit "
 		"CREATE (v)-[:POSTED_TO {debit: debit, credit: credit}]->(a) RETURN count(*) AS n",
+		"(v:Record)-[r:POSTED_TO]->(:Account)",
+		"v.name IN $pivots",
 	),
 	rename("account tree", "CHILD_OF", ["parent_account"], "Account", ["Account"]),
 	# HR
@@ -204,45 +291,53 @@ RULES: tuple[Rule, ...] = (
 	rename("department tree", "CHILD_OF", ["parent_department"], "Department", ["Department"]),
 	rename("employee docs", "FOR_EMPLOYEE", ["employee"], "Employee", EMPLOYEE_DOCS),
 	rename("leave type", "OF_TYPE", ["leave_type"], "Leave Type"),
-	Rule(
+	derived(
 		"salary structure",
 		"MATCH (ssa:`Salary Structure Assignment`)-[:FOR_EMPLOYEE]->(e:Employee), "
 		"(ssa)-[:LINKS_TO {field: 'salary_structure'}]->(st:`Salary Structure`) WHERE ssa.docstatus = 1 "
 		"CREATE (e)-[:ON_STRUCTURE {from_date: ssa.from_date, base: ssa.base}]->(st) RETURN count(*) AS n",
+		"(e:Employee)-[r:ON_STRUCTURE]->(:`Salary Structure`)",
+		"e.name IN $pivots",
 	),
-	Rule(
+	derived(
 		"salary earnings",
 		"MATCH (e:Employee)<-[:FOR_EMPLOYEE]-(ss:`Salary Slip`)-[:HAS_CHILD]->(sd:`Salary Detail`)"
 		"-[:LINKS_TO {field: 'salary_component'}]->(c:`Salary Component`) "
 		"WHERE ss.docstatus = 1 AND sd.parentfield = 'earnings' "
 		"WITH e, c, sum(sd.amount) AS total, count(DISTINCT ss) AS slips "
 		"CREATE (e)-[:EARNS {total: total, slips: slips}]->(c) RETURN count(*) AS n",
+		"(e:Employee)-[r:EARNS]->(:`Salary Component`)",
+		"e.name IN $pivots",
 	),
-	Rule(
+	derived(
 		"salary deductions",
 		"MATCH (e:Employee)<-[:FOR_EMPLOYEE]-(ss:`Salary Slip`)-[:HAS_CHILD]->(sd:`Salary Detail`)"
 		"-[:LINKS_TO {field: 'salary_component'}]->(c:`Salary Component`) "
 		"WHERE ss.docstatus = 1 AND sd.parentfield = 'deductions' "
 		"WITH e, c, sum(sd.amount) AS total, count(DISTINCT ss) AS slips "
 		"CREATE (e)-[:DEDUCTS {total: total, slips: slips}]->(c) RETURN count(*) AS n",
+		"(e:Employee)-[r:DEDUCTS]->(:`Salary Component`)",
+		"e.name IN $pivots",
 	),
-	Rule(
+	derived(
 		"leave taken",
 		"MATCH (e:Employee)<-[:FOR_EMPLOYEE]-(la:`Leave Application`)-[:OF_TYPE]->(t:`Leave Type`) "
 		"WHERE la.status = 'Approved' "
 		"WITH e, t, sum(la.total_leave_days) AS days, count(la) AS applications "
 		"CREATE (e)-[:TOOK_LEAVE {days: days, applications: applications}]->(t) RETURN count(*) AS n",
+		"(e:Employee)-[r:TOOK_LEAVE]->(:`Leave Type`)",
+		"e.name IN $pivots",
 	),
 	Rule(
 		"attendance summary",
-		"MATCH (a:Attendance)-[:FOR_EMPLOYEE]->(e:Employee) WHERE a.docstatus = 1 "
-		"WITH e, sum(CASE WHEN a.status = 'Present' THEN 1 ELSE 0 END) AS present, "
-		"sum(CASE WHEN a.status = 'Absent' THEN 1 ELSE 0 END) AS absent, "
-		"sum(CASE WHEN a.status = 'On Leave' THEN 1 ELSE 0 END) AS on_leave, "
-		"sum(CASE WHEN a.status = 'Half Day' THEN 1 ELSE 0 END) AS half_day, "
-		"sum(CASE WHEN a.status = 'Work From Home' THEN 1 ELSE 0 END) AS wfh "
-		"SET e.days_present = present, e.days_absent = absent, e.days_on_leave = on_leave, "
-		"e.days_half_day = half_day, e.days_wfh = wfh RETURN count(*) AS n",
+		ATTENDANCE_SUMMARY,
+		(
+			# The upsert replaces an Employee's properties, so reset first: an employee whose
+			# attendance was all deleted keeps no stale totals.
+			"MATCH (e:Employee) WHERE e.name IN $pivots SET e.days_present = 0, e.days_absent = 0, "
+			"e.days_on_leave = 0, e.days_half_day = 0, e.days_wfh = 0 RETURN count(*) AS n",
+			scope(ATTENDANCE_SUMMARY, "e.name IN $pivots"),
+		),
 	),
 	# Projects and assets
 	rename("task project", "PART_OF", ["project"], "Project", ["Task", "Timesheet Detail"]),
@@ -255,30 +350,39 @@ RULES: tuple[Rule, ...] = (
 	rename("employee user", "IS_USER", ["user_id"], "User", ["Employee"]),
 	rename("sales person employee", "IS_EMPLOYEE", ["employee"], "Employee", ["Sales Person"]),
 	rename("sales person tree", "CHILD_OF", ["parent_sales_person"], "Sales Person", ["Sales Person"]),
-	Rule(
+	derived(
 		"created by",
 		f"MATCH (r:Record) WHERE r.doctype IN {to_literal(CREATED_DOCS)} "
 		f"AND NOT r.owner IN {to_literal(SYSTEM_USERS)} "
 		"MATCH (u:User {name: r.owner}) CREATE (r)-[:CREATED_BY]->(u) RETURN count(*) AS n",
+		"(r:Record)-[k:CREATED_BY]->(:User)",
+		"r.name IN $names",
+		edge_var="k",
 	),
-	Rule(
+	derived(
 		"customer managed by",
 		"MATCH (c:Customer)-[:HAS_CHILD]->(st:`Sales Team`)-[:LINKS_TO {field: 'sales_person'}]->(sp:`Sales Person`) "
 		"WITH c, sp, sum(coalesce(st.allocated_percentage, 0)) AS share "
 		"CREATE (c)-[:MANAGED_BY {share: share}]->(sp) RETURN count(*) AS n",
+		"(c:Customer)-[r:MANAGED_BY]->(:`Sales Person`)",
+		"c.name IN $names",
 	),
-	Rule(
+	derived(
 		"sales person sold to",
 		"MATCH (c:Customer)<-[:FOR_CUSTOMER]-(si:`Sales Invoice`)-[:HAS_CHILD]->(st:`Sales Team`)"
 		"-[:LINKS_TO {field: 'sales_person'}]->(sp:`Sales Person`) WHERE si.docstatus = 1 "
 		"WITH sp, c, count(DISTINCT si) AS invoices, sum(coalesce(st.allocated_amount, 0)) AS amount "
 		"CREATE (sp)-[:SOLD_TO {invoices: invoices, amount: amount}]->(c) RETURN count(*) AS n",
+		"(:`Sales Person`)-[r:SOLD_TO]->(c:Customer)",
+		"c.name IN $pivots",
 	),
 	rename("todo assignee", "ASSIGNED_TO", ["allocated_to"], "User", ["ToDo"]),
 	rename("todo assigner", "ASSIGNED_BY", ["assigned_by"], "User", ["ToDo"]),
-	Rule(
+	derived(
 		"notes on records",
 		"MATCH (n:Record)-[r:LINKS_TO {field: 'reference_name'}]->(d:Record) WHERE n.doctype IN ['Comment', 'ToDo'] "
 		"CREATE (n)-[:ON]->(d) DELETE r RETURN count(*) AS n",
+		"(n:Record)-[r:ON]->(:Record)",
+		"n.name IN $names",
 	),
 )

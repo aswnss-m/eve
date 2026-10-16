@@ -26,3 +26,14 @@ def sync_all() -> dict:
 	frappe.only_for("System Manager")
 	enqueue_data_sync(full=True)
 	return {"queued": True}
+
+
+@frappe.whitelist()
+def drain_now() -> dict:
+	"""Queue the incremental drain for whatever is pending, without waiting for a save or the sweep."""
+	frappe.only_for("System Manager")
+	from eve_agent.sync.refresh import sweep, trigger_drain
+
+	sweep()
+	trigger_drain()
+	return {"queued": True}

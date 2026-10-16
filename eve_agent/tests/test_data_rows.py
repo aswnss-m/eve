@@ -53,6 +53,11 @@ class PlanTests(unittest.TestCase):
 		self.assertEqual(list(plan.children), ["Sales Order Item"])
 		self.assertTrue(plan.children["Sales Order Item"].is_child)
 
+	def test_extra_doctypes_join_once(self):
+		plan = plan_from_schema(NODES, modules=["Selling"], extra=["Item", "Customer", "Selling Settings", "Nope"])
+		self.assertEqual([p.name for p in plan.parents], ["Customer", "Item", "Sales Order"])
+		self.assertEqual([p.name for p in plan_from_schema(NODES, modules=["Selling"], exclude=["Item"], extra=["Item"]).parents], ["Customer", "Sales Order"])
+
 	def test_field_selection(self):
 		so = plan_from_schema(NODES, modules=["Selling"]).parents[-1]
 		self.assertEqual(so.value_fields, ["customer", "customer_name", "party_type", "party", "grand_total"])
@@ -147,6 +152,7 @@ class ImportTests(unittest.TestCase):
 		self.assertEqual(summary.links, 1)  # C-missing and Item (not loaded) are dropped
 		self.assertEqual(summary.skipped, ["Item"])
 		self.assertTrue(any("CREATE INDEX FOR (n:`Sales Order Item`)" in q for q, _ in client.queries))
+		self.assertTrue(any("CREATE INDEX FOR (n:Record)" in q for q, _ in client.queries))
 
 
 if __name__ == "__main__":

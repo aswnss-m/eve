@@ -5,8 +5,9 @@ POST /api/method/eve_agent.api.chat.stream   (Desk session and CSRF token)
   reply: text/event-stream of JSON events (see eve_agent/chat/loop.py), ending with "finish" or "error"
 
 The request reads everything it needs from Frappe (user, roles, Settings) before
-it returns. The stream itself only talks to FalkorDB and the LLM, so it does not
-depend on the request-scoped Frappe state.
+it returns. Frappe's request context stays alive while the response streams (it is
+released by a ClosingIterator callback), which the Cypher log and the permission
+check for record proposals rely on; anything they write commits itself.
 """
 
 import json
@@ -18,7 +19,8 @@ import litellm
 from frappe import _
 from werkzeug.wrappers import Response
 
-from eve_agent.api.agent import chat_allowed, get_settings
+from eve_agent.api.agent import chat_allowed, get_settings, write_doctypes
+from eve_agent.chat import cypher_log
 from eve_agent.chat.common import ChatConfig, ChatUser, ToolContext
 from eve_agent.chat.graph import Graph
 from eve_agent.chat.llm import DEFAULT_MODEL, model_arguments
@@ -43,7 +45,7 @@ def stream(id: str = "", messages: list | None = None) -> Response:
 	if not question:
 		frappe.throw(_("Ask Eve a question first."))
 
-	ctx = build_context(settings)
+	ctx = build_context(settings, question=question, chat_id=str(id or "default"))
 	return Response(
 		_events(ctx, history, str(id or "default"), question),
 		mimetype="text/event-stream",
@@ -60,7 +62,7 @@ def last_user_text(messages: list[dict]) -> str:
 	return ""
 
 
-def build_context(settings) -> ToolContext:
+def build_context(settings, question: str = "", chat_id: str = "") -> ToolContext:
 	user = frappe.session.user
 	config = ChatConfig(
 		site=frappe.local.site,
@@ -74,6 +76,9 @@ def build_context(settings) -> ToolContext:
 		data_as_of=str(settings.last_data_synced_at or ""),
 		currency=frappe.defaults.get_global_default("currency") or "",
 		company=frappe.defaults.get_global_default("company") or "",
+		allow_create=bool(settings.get("allow_create")),
+		allow_update=bool(settings.get("allow_update")),
+		write_doctypes=write_doctypes(settings),
 	)
 	chat_user = ChatUser(user=user, name=frappe.utils.get_fullname(user), roles=frappe.get_roles(user))
 	return ToolContext(
@@ -82,6 +87,10 @@ def build_context(settings) -> ToolContext:
 		data=Graph(config.redis_url, config.data_graph),
 		schema=Graph(config.redis_url, config.schema_graph),
 		memory=Graph(config.redis_url, config.memory_graph),
+		question=question,
+		chat_id=chat_id,
+		can_write=lambda doctype, ptype: bool(frappe.has_permission(doctype, ptype, user=user)),
+		log_cypher=cypher_log.record,
 	)
 
 

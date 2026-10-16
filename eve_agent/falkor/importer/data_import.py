@@ -74,7 +74,13 @@ class _Loader:
 		return total
 
 
-def import_data(client, plan: DataPlan, fetch_records: FetchRecords, fetch_children: FetchChildren) -> DataImportSummary:
+def import_data(
+	client,
+	plan: DataPlan,
+	fetch_records: FetchRecords,
+	fetch_children: FetchChildren,
+	fulltext_labels: tuple[str, ...] = dq.FULLTEXT_LABELS,
+) -> DataImportSummary:
 	summary = DataImportSummary()
 	loader = _Loader(client)
 	targets = plan.parent_names
@@ -87,6 +93,8 @@ def import_data(client, plan: DataPlan, fetch_records: FetchRecords, fetch_child
 				link_edges[(dt_plan.name, target)].append(edge)
 
 	client.delete_graph()
+	# Scoped rules of the incremental sync look records up by name without a label.
+	client.query(dq.CREATE_RECORD_INDEX)
 
 	for parent in plan.parents:
 		records = fetch_records(parent)
@@ -115,7 +123,7 @@ def import_data(client, plan: DataPlan, fetch_records: FetchRecords, fetch_child
 
 	summary.child_edges = loader.create_edges(dq.CREATE_DATA_CHILDREN, child_edges)
 	summary.links = loader.create_edges(dq.CREATE_DATA_LINKS, link_edges)
-	for label in dq.FULLTEXT_LABELS:
+	for label in dict.fromkeys(fulltext_labels):
 		if loader.loaded.get(label):
 			client.query(dq.CREATE_FULLTEXT_INDEX.format(label=dq.quote_label(label)))
 	return summary

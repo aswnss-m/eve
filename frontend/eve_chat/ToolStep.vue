@@ -57,6 +57,8 @@ const LABELS = {
 	graph_schema: "Read the graph schema",
 	describe_doctype: "Read a DocType's fields",
 	run_cypher: "Ran a custom query",
+	record_form: "Read the fields a record needs",
+	propose_record: "Proposed a record",
 	recall: "Searched past conversations",
 	remember_insight: "Saved to memory",
 };

@@ -24,3 +24,25 @@ def apply_business_rules(client, rules: tuple[Rule, ...] = RULES) -> BusinessLay
 		result = client.query(rule.cypher)
 		summary.counts[rule.name] = int(result.rows[0][0] or 0) if result.rows else 0
 	return summary
+
+
+def apply_scoped_rules(
+	client, names: list[str], pivots: list[str], rules: tuple[Rule, ...] = RULES, batch: int = 500
+) -> BusinessLayerSummary:
+	"""Run every rule's scoped statements for the records in `names` and the masters in `pivots`.
+
+	Statements are a delete + create pair with the same scope, so this is idempotent.
+	A statement reads either $names or $pivots; that list is sent in chunks.
+	"""
+	summary = BusinessLayerSummary()
+	for rule in rules:
+		count = 0
+		for statement in rule.scoped:
+			scope_list = pivots if "$pivots" in statement else names
+			for start in range(0, len(scope_list), batch):
+				chunk = scope_list[start : start + batch]
+				result = client.query(statement, {"names": chunk, "pivots": chunk})
+				if result.rows:
+					count += int(result.rows[0][0] or 0)
+		summary.counts[rule.name] = count
+	return summary

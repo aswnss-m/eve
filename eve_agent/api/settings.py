@@ -1,6 +1,18 @@
 import frappe
 
-from eve_agent.sync.schema_sync import get_graph_client
+from eve_agent.sync.schema_sync import SETTINGS_DOCTYPE, get_graph_client
+
+SYNC_STATUS_FIELDS = (
+	"last_synced_at",
+	"last_sync_status",
+	"last_sync_summary",
+	"active_data_graph",
+	"last_data_synced_at",
+	"last_data_sync_status",
+	"last_data_sync_summary",
+	"last_incremental_sync_at",
+	"last_incremental_summary",
+)
 
 
 def module_names(client) -> set[str]:
@@ -24,3 +36,12 @@ def test_connection() -> dict:
 		return {"ok": True, "redis_version": info, "graph_module": has_graph, "graph": client.graph_name}
 	except Exception as exc:
 		return {"ok": False, "error": str(exc)}
+
+
+@frappe.whitelist()
+def sync_status() -> dict | None:
+	"""The read-only sync fields of Eve Agent Settings, for the Sync Status block on the Eve workspace."""
+	if not frappe.has_permission(SETTINGS_DOCTYPE):
+		return None
+	settings = frappe.get_single(SETTINGS_DOCTYPE)
+	return {field: settings.get(field) for field in SYNC_STATUS_FIELDS}

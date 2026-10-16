@@ -60,6 +60,11 @@ frappe.ui.form.on("Eve Agent Settings", {
 			() => queue_sync(frm, "eve_agent.api.sync.sync_all", __("Full resync")),
 			sync
 		);
+		frm.add_custom_button(
+			__("Sync Pending Changes Now"),
+			() => queue_sync(frm, "eve_agent.api.sync.drain_now", __("Incremental sync")),
+			sync
+		);
 
 		if (frm.doc.browser_url) {
 			frm.add_custom_button(__("Open FalkorDB Browser"), () => window.open(frm.doc.browser_url, "_blank"));

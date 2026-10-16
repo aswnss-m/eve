@@ -55,9 +55,3 @@ RETURN d.name, d.module, d.is_submittable, d.is_single, d.is_child, d.is_tree,
        d.fields_json, d.modified
 ORDER BY d.name
 """
-
-EXPORT_EDGES = """
-MATCH (a:DocType)-[r]->(b:DocType)
-RETURN a.name, type(r), r.fieldname, b.name
-ORDER BY a.name, r.fieldname
-"""

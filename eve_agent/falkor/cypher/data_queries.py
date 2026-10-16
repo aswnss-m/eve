@@ -14,6 +14,8 @@ def quote_label(name: str) -> str:
 
 
 CREATE_INDEX = "CREATE INDEX FOR (n:{label}) ON (n.name)"
+# The incremental sync scopes business rules by name across every DocType.
+CREATE_RECORD_INDEX = f"CREATE INDEX FOR (n:{RECORD_LABEL}) ON (n.name)"
 
 # Full-text indexes back the agent's fuzzy entity lookup (find_entity).
 FULLTEXT_LABELS = ("Customer", "Supplier", "Item", "Employee", "Project", "Sales Person", "User", "Lead")

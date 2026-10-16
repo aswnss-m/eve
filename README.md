@@ -17,7 +17,7 @@ It keeps three graphs per site:
 
 
 - **[docs/graph-guide.md](docs/graph-guide.md)**: the graph model, and ready-to-run Cypher for sales, buying, stock, accounts, HR, payroll, projects and assets.
-- **[docs/agent-queries.md](docs/agent-queries.md)**: every Cypher query the agent's tools run.
+- **`eve_agent/chat/tools/`**: every Cypher query the agent's tools run, one module per tool group.
 
 ### How it works
 
@@ -103,12 +103,15 @@ Open **Eve** workspace → **Eve Agent Settings**.
 | Setting                 | Default                  | Notes                                                                                                                       |
 | ----------------------- | ------------------------ | --------------------------------------------------------------------------------------------------------------------------- |
 | FalkorDB Redis URL      | `redis://127.0.0.1:6500` | The FalkorDB server from step 1. Include a password if you set one: `redis://:pass@host:port`                               |
-| Graph Name              | `<site>_schema`          | Schema graph. Leave blank for the default                                                                                   |
+| Schema Graph Name       | `<site>_schema`          | Leave blank for the default                                                                                                 |
 | FalkorDB Browser URL    | `http://127.0.0.1:4000`  | Used by the "Open FalkorDB Browser" button                                                                                  |
 | Data Graph Name         | `<site>_data`            | Record graph. Leave blank for the default                                                                                   |
+| Memory Graph Name       | `<site>_memory`          | Per-user chat memory. Leave blank for the default                                                                           |
 | Max Records per DocType | 5000                     | Newest records first. Child rows of loaded records are always included                                                      |
-| Modules                 | blank                    | One module per line. Blank means Accounts, Selling, Buying, Stock, Setup, CRM, Projects, Assets, Manufacturing, HR, Payroll |
+| Modules                 | default list             | Allowlist, one module per line: a single module loads only that module. Blank restores Accounts, Selling, Buying, Stock, Setup, CRM, Projects, Assets, Manufacturing, HR, Payroll. The Module Def list shows every module |
 | Exclude DocTypes        | blank                    | One DocType per line, e.g. noisy log DocTypes                                                                               |
+| Additional DocTypes to Graph | blank               | One DocType per line, for DocTypes outside the modules (custom apps). A DocType a module already covers is synced once      |
+| Incremental Sync        | on                       | Push every saved, submitted, cancelled or deleted record to the active graph within seconds (see "When it syncs")           |
 
 
 Click **Test Connection**. It should report the Redis version, `graph module: yes`, and the graph name.
@@ -123,7 +126,7 @@ The data graph is built **from the schema graph**, so sync the schema first (Ful
 - **Sync Data Graph Now**: rebuilds `<site>_data` from records, then applies the business rules.
 - **Full Resync**: does the schema sync, then the data sync.
 
-These run as background jobs on the `long` queue, so a worker must be running. An alert appears when a sync finishes, and the form shows **Last Sync Status / Summary** for both graphs. Failures are written to **Error Log** (also in the Eve workspace).
+These run as background jobs on the `long` queue, so a worker must be running. An alert appears when a sync finishes, and the **Sync Status** section at the bottom of the form shows the last run of each sync. The Eve workspace shows the same three readouts at the top. Failures are written to **Error Log** (also in the Eve workspace).
 
 **From the terminal:** these commands run synchronously and print a summary.
 
@@ -142,8 +145,11 @@ Data: DocTypes with data: 80, records: 12383, child rows: 6465, HAS_CHILD: 6465,
 
 **When it syncs automatically:**
 - The schema sync runs after `install-app` and after every `bench migrate`.
-- Saving, submitting, cancelling or deleting a record in a synced module marks the data graph dirty. A scheduled job runs every 5 minutes and queues one rebuild when the graph is dirty, so the site's scheduler must be enabled (`bench --site <site> enable-scheduler`).
-- Rebuilds are blue/green: they alternate between `<site>_data` and `<site>_data_next`. **Active Data Graph** in Eve Agent Settings switches to the new graph only after it is complete, so the agent never reads a half-built graph.
+- **Incrementally, within seconds.** Saving, submitting, cancelling, renaming or deleting a synced record queues it (after the transaction commits), and a job on the `short` queue upserts those records into the active graph: the node, its child rows, its links, and the business relationships around it (a new invoice updates the customer's `BOUGHT` totals; a cancelled one takes them back). Many saves in a row are drained in batches. **Sync Pending Changes Now** on the Settings page queues this by hand; **Incremental Synced At / Summary** under Sync Status show the last run.
+- **Every 5 minutes**, a sweep queues records whose `modified` changed without a hook (ERPNext updates invoice status, outstanding amounts, bins and cancelled GL entries with direct SQL), so those catch up at the next sweep. The site's scheduler must be enabled (`bench --site <site> enable-scheduler`).
+- **Nightly at 02:00**, a full rebuild heals what the incremental path cannot see: links to records that were not in the graph yet, documents still pointing at a renamed master, raw SQL writes, and the `Max Records per DocType` cap (incremental upserts ignore it).
+- Rebuilds are blue/green: they alternate between `<site>_data` and `<site>_data_next`. Records that change while a rebuild runs are applied to the new graph before **Active Data Graph** in Eve Agent Settings switches to it, so the agent never reads a half-built or stale graph.
+- Turn **Incremental Sync** off to go back to rebuilds only.
 
 ### 5. Explore
 
@@ -177,8 +183,18 @@ redis-cli -p 6500 GRAPH.RO_QUERY eve_local_data "MATCH (n:Record) RETURN n.docty
    - **Chat Roles**: who sees the Ask Eve button. Defaults to System Manager, Sales Manager and Accounts Manager.
 2. **Start the bench.** The chat runs inside the bench's web process, so `bench start` serves it. There is no second server and no npm command to run.
 3. **Reload the Desk.** Click **Ask Eve** at the bottom right. Each answer lists its steps. Expand a step to see the Cypher, its parameters and the first rows, and click a source chip to open the record.
+4. **Talk instead of typing.** The microphone button in the composer dictates into the text box (Chrome, Edge and Safari; needs https or `localhost` for microphone access). Review the transcript, then press Enter.
 
 Settings are read on every question, so a model or key change applies to the next message without a restart.
+
+**Letting Eve create records.** With **Allow Eve to create records** (and optionally **Allow Eve to update records**) on in Eve Agent Settings → **Eve Actions**, Eve can turn "Ashish is a new customer, his email is ashish@gmail.com, add him" or "create a sales invoice for Ashish, 2 units of SDR-0018" into a record:
+
+- Eve reads the DocType's fields from the schema graph (`record_form`), asks for the required values and child rows it cannot infer, and resolves names with `find_entity` so links are exact.
+- It then proposes the record (`propose_record`). Nothing is written yet: a card in the chat shows the DocType and every value, with **Create** / **Cancel**.
+- **Create** inserts the record as the Desk user, so Frappe's own permissions and validations apply, and a dialog offers to open it. Submittable documents (invoices, orders, stock entries) are always created as **drafts**; Eve never submits. Review and submit them in the Desk.
+- **DocTypes Eve may write** lists what Eve may propose. Everything else is refused.
+
+**Cypher log.** Every Cypher the model writes itself (`run_cypher`) is stored in **Eve Cypher Log** (Eve workspace → Cypher Log) with the question, purpose, rows, timing, user and outcome, so repeated questions can later be served from a known-good query. Log Settings can prune it (90 days by default).
 
 **Demo data for the people layer.** Seeded sites usually have every record owned by Administrator, so `who_knows` has no one to report. This command adds synthetic sales people, customer assignments, comments and ToDos written as the employee users:
 
@@ -202,7 +218,9 @@ bench --site <site> sync-data
 | Chat answers "You are not allowed to chat with Eve"       | Your roles aren't in **Chat Roles**, or **Enable Chat** is off                                                                                                                 |
 | Chat shows an AuthenticationError or "API key"            | No key for the model's provider. Set **LLM API Key**, or the provider variable (e.g. `ANTHROPIC_API_KEY`) in the environment that runs `bench start`, then restart the bench      |
 | Chat shows "LLM Provider NOT provided" or "model not found" | Check **LLM Model**: the provider prefix must be one LiteLLM knows (`anthropic:`, `openai:`, `google:`, `compatible:`, or a LiteLLM name such as `ollama/llama3.1`)              |
-| Answers mention old data                                  | The scheduler is disabled, or no record has changed since the last rebuild. Use **Sync Data Graph Now**                                                                       |
+| Answers mention old data                                  | No `short` worker is running (incremental sync), the scheduler is disabled, or **Incremental Sync** is off. Use **Sync Pending Changes Now** or **Sync Data Graph Now**            |
+| A new record is in the graph but a total (e.g. BOUGHT) is off | Cross-document totals are recomputed for the records a change touches; anything missed is corrected by the nightly rebuild, or run **Sync Data Graph Now**                 |
+| No microphone button in the chat                          | The browser has no SpeechRecognition (Firefox), or the Desk is served over plain http from a host other than localhost                                                       |
 
 
 
@@ -218,31 +236,38 @@ eve_agent/
     cypher/          #   schema_queries, data_queries, business_rules (ERPNext/HRMS + people layer)
     importer/        #   schema_import, data_rows, data_import, business_layer
   sync/              # Frappe glue: meta_reader, record_reader, schema_sync, data_sync, refresh (keep current)
-  api/               # whitelisted endpoints: chat (streamed Ask Eve turn), agent (permissions, Settings), settings, sync
+  falkor/importer/incremental.py  # per-record upsert into a live graph (used by sync/refresh.py)
+  sync/refresh.py    # doc_events hook, pending queue, drain job, 5-minute sweep, nightly rebuild
+  api/               # whitelisted endpoints: chat (streamed Ask Eve turn), agent (permissions, Settings), actions (apply a confirmed record), settings, sync
   chat/              # Ask Eve: LLM layer (LiteLLM), turn loop, graph tools, memory, system prompt
     llm.py           #   provider:model → LiteLLM model
     loop.py          #   streamed tool-calling loop and its events
-    tools/           #   the graph tools (entities, sales, brain, utility)
+    tools/           #   the graph tools (entities, sales, brain, utility, actions)
     memory.py        #   per-user memory graph
+    cypher_log.py    #   Eve Cypher Log writer
   boot.py            # tells the Desk whether to show Ask Eve
   demo/              # synthetic people-layer data for demos
   public/dist/       # built chat widget (committed; rebuild with `npm run build`)
   commands.py        # bench sync-schema / sync-data
 frontend/eve_chat/   # chat widget source (Vue 3, streams from the chat endpoint)
-agent/               # retired Node agent server (replaced by eve_agent/chat); not used, safe to delete
 docs/graph-guide.md  # graph model and Cypher recipes
-docs/agent-queries.md # Cypher the agent runs
 ```
 
-After changing `frontend/`, run `npm install && npm run build` in `apps/eve_agent`, and commit `eve_agent/public/dist`.
+After changing `frontend/`, run `npm install && npm run build` in `apps/eve_agent`, and commit `eve_agent/public/dist`. Then `bench --site <site> clear-cache`: the widget's URL carries the build's timestamp, which is cached with the site's hooks, so browsers fetch the new file on the next reload.
 
-To add an ERPNext/HRMS relationship, add a rule to `RULES` in `eve_agent/falkor/cypher/business_rules.py` (see the end of the graph guide), then resync the data graph.
+To add an ERPNext/HRMS relationship, add a rule to `RULES` in `eve_agent/falkor/cypher/business_rules.py` (see the end of the graph guide), then resync the data graph. Every rule also carries `scoped` statements that the incremental sync runs for just the records that changed; the `rename`, `flow`, `derived` and `local` builders produce both forms from one query.
 
 The Python tests need no site and no LLM. The chat tests script the model:
 
 ```bash
 cd apps/eve_agent
-../../env/bin/python -m unittest eve_agent.tests.test_falkor_pure eve_agent.tests.test_data_rows eve_agent.tests.test_business_rules eve_agent.tests.test_agent_api eve_agent.tests.test_chat
+../../env/bin/python -m unittest eve_agent.tests.test_falkor_pure eve_agent.tests.test_data_rows eve_agent.tests.test_business_rules eve_agent.tests.test_agent_api eve_agent.tests.test_chat eve_agent.tests.test_incremental
+```
+
+The record-write endpoint has Frappe tests that need a site with ERPNext data (`bench --site <site> set-config allow_tests true` once):
+
+```bash
+bench --site <site> run-tests --module eve_agent.tests.test_actions
 ```
 
 `test_chat` also runs every tool, and a scripted turn that is remembered, against a live data graph. It skips when FalkorDB or the graph is missing. Set `EVE_TEST_REDIS` / `EVE_TEST_GRAPH` to point it elsewhere, or `EVE_TEST_LIVE=0` to turn it off.
@@ -269,6 +294,6 @@ Pre-commit is configured to use the following tools for checking and formatting 
 
 - **Track:** Company Brain (Track 03). The graph also does the work for Agents That Act on Connected Data (multi-hop tools, explainable results) and Agent Memory (the per-user memory graph).
 - **Data:** synthetic. The demo site is filled by a seeding app plus `eve_agent.demo.seed_people`; no real customer or personal data.
-- **Graph model:** [docs/graph-guide.md](docs/graph-guide.md). **Queries the product depends on:** [docs/agent-queries.md](docs/agent-queries.md) and `eve_agent/falkor/cypher/`.
+- **Graph model:** [docs/graph-guide.md](docs/graph-guide.md). **Queries the product depends on:** `eve_agent/chat/tools/` and `eve_agent/falkor/cypher/`.
 - **AI assistance:** AI coding assistants (Claude Code) were used to build parts of this project.
 

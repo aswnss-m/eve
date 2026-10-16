@@ -110,14 +110,14 @@ def entity_tools(ctx: ToolContext) -> list[Tool]:
 		runs = []
 		labels = [args.doctype] if args.doctype else list(FULLTEXT_LABELS)
 		for lbl in labels:
-			if lbl not in FULLTEXT_LABELS or not query:
+			if not query:
 				continue
 			try:
 				run = ctx.data.ro(f"Full-text search in {lbl}", FIND_FULLTEXT, {"label": lbl, "query": query})
 				if run.rows:
 					runs.append(run)
 			except Exception:
-				pass  # No full-text index for this label yet (graph built before indexes existed).
+				pass  # No full-text index for this label (custom DocType, or a graph built before indexes existed).
 		if not runs:
 			for lbl in labels:
 				try:

@@ -27,8 +27,22 @@ app_license = "mit"
 # include js, css files in header of desk.html
 # app_include_css = "/assets/eve_agent/css/eve_agent.css"
 # app_include_js = "/assets/eve_agent/js/eve_agent.js"
-app_include_js = "/assets/eve_agent/dist/eve_chat.js"
-app_include_css = "/assets/eve_agent/dist/eve_chat.css"
+import os as _os
+
+
+def _versioned(asset: str) -> str:
+	"""Desk includes these paths verbatim and serves them with a 12-hour cache header, so a
+	rebuilt widget would stay invisible: the file's mtime makes the URL change with every build.
+	Hooks are cached per site; run `bench clear-cache` after `npm run build`."""
+	path = _os.path.join(_os.path.dirname(__file__), "public", asset)
+	try:
+		return f"/assets/eve_agent/{asset}?v={int(_os.path.getmtime(path))}"
+	except OSError:
+		return f"/assets/eve_agent/{asset}"
+
+
+app_include_js = _versioned("dist/eve_chat.js")
+app_include_css = _versioned("dist/eve_chat.css")
 boot_session = "eve_agent.boot.boot_session"
 
 # include js, css files in header of web template
@@ -88,22 +102,29 @@ boot_session = "eve_agent.boot.boot_session"
 after_install = "eve_agent.install.after_install"
 after_migrate = ["eve_agent.install.after_migrate"]
 
-# Keep the data graph current: any synced record change marks it dirty, and a
-# 5-minute job queues one blue/green rebuild (see eve_agent/sync/refresh.py).
+# Keep the data graph current: every synced record change queues an incremental
+# upsert into the active graph, a 5-minute sweep catches changes made without a
+# hook, and a nightly blue/green rebuild heals the rest (see eve_agent/sync/refresh.py).
 doc_events = {
 	"*": {
-		"on_update": "eve_agent.sync.refresh.mark_dirty",
-		"on_submit": "eve_agent.sync.refresh.mark_dirty",
-		"on_cancel": "eve_agent.sync.refresh.mark_dirty",
-		"on_trash": "eve_agent.sync.refresh.mark_dirty",
+		"on_update": "eve_agent.sync.refresh.queue_record",
+		"on_submit": "eve_agent.sync.refresh.queue_record",
+		"on_cancel": "eve_agent.sync.refresh.queue_record",
+		"on_update_after_submit": "eve_agent.sync.refresh.queue_record",
+		"on_trash": "eve_agent.sync.refresh.queue_record",
+		"after_rename": "eve_agent.sync.refresh.queue_record",
 	}
 }
 
 scheduler_events = {
 	"cron": {
-		"*/5 * * * *": ["eve_agent.sync.refresh.refresh_if_dirty"],
+		"*/5 * * * *": ["eve_agent.sync.refresh.sweep"],
+		"0 2 * * *": ["eve_agent.sync.refresh.nightly_rebuild"],
 	}
 }
+
+# Log Settings can prune the Cypher log.
+default_log_clearing_doctypes = {"Eve Cypher Log": 90}
 
 # Uninstallation
 # ------------
