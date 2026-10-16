@@ -199,8 +199,22 @@ function onKeydown(event) {
 	if (event.key === "Escape" && open.value && !document.querySelector(".modal.show")) close();
 }
 
-onMounted(() => window.addEventListener("keydown", onKeydown));
-onBeforeUnmount(() => window.removeEventListener("keydown", onKeydown));
+// A click outside the panel minimizes it. Desk dialogs (e.g. "Open now" after a record is created)
+// sit outside the panel but belong to the conversation, so they do not count.
+function onPointerDown(event) {
+	if (!open.value || minimized.value) return;
+	if (event.target.closest("#eve-chat-root, .modal, .modal-backdrop")) return;
+	minimize();
+}
+
+onMounted(() => {
+	window.addEventListener("keydown", onKeydown);
+	document.addEventListener("mousedown", onPointerDown);
+});
+onBeforeUnmount(() => {
+	window.removeEventListener("keydown", onKeydown);
+	document.removeEventListener("mousedown", onPointerDown);
+});
 </script>
 
 <style>

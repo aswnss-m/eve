@@ -1,5 +1,6 @@
 <template>
 	<div class="eve-composer-wrap">
+		<div v-if="hint" class="eve-composer-hint" role="status">{{ hint }}</div>
 		<div class="eve-composer" :class="{ 'is-busy': busy, 'is-listening': listening }">
 			<textarea
 				ref="input"
@@ -85,7 +86,6 @@
 				</svg>
 			</button>
 		</div>
-		<div v-if="hint" class="eve-composer-hint" role="status">{{ hint }}</div>
 	</div>
 </template>
 
@@ -217,15 +217,24 @@ defineExpose({ focus, stopDictation });
 	border-color: var(--primary, var(--blue-500, #2490ef));
 	box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary, #2490ef) 18%, transparent);
 }
+.eve-composer-wrap {
+	position: relative;
+}
+/* Floats above the box, so showing it never moves the input. */
 .eve-composer-hint {
-	padding: 4px 16px 0;
+	position: absolute;
+	left: 16px;
+	right: 16px;
+	bottom: calc(100% + 6px);
 	font-size: 11px;
 	color: var(--text-muted, #6c7680);
+	pointer-events: none;
 }
 .eve-textarea {
 	flex: 1;
 	min-width: 0;
-	min-height: 24px;
+	/* One line (21px) plus padding is 34px: the same height as the round buttons, so they sit centred. */
+	min-height: 34px;
 	max-height: 200px;
 	resize: none;
 	border: none;
@@ -233,9 +242,10 @@ defineExpose({ focus, stopDictation });
 	background: transparent;
 	color: var(--text-color, #1f272e);
 	font: inherit;
-	font-size: var(--text-md, 14px);
-	line-height: 1.5;
-	padding: 9px 0;
+	font-size: 14px;
+	line-height: 21px;
+	padding: 6.5px 0;
+	box-sizing: border-box;
 }
 .eve-textarea::placeholder {
 	color: var(--text-muted, #8d99a6);

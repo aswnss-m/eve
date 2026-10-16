@@ -27,8 +27,22 @@ app_license = "mit"
 # include js, css files in header of desk.html
 # app_include_css = "/assets/eve_agent/css/eve_agent.css"
 # app_include_js = "/assets/eve_agent/js/eve_agent.js"
-app_include_js = "/assets/eve_agent/dist/eve_chat.js"
-app_include_css = "/assets/eve_agent/dist/eve_chat.css"
+import os as _os
+
+
+def _versioned(asset: str) -> str:
+	"""Desk includes these paths verbatim and serves them with a 12-hour cache header, so a
+	rebuilt widget would stay invisible: the file's mtime makes the URL change with every build.
+	Hooks are cached per site; run `bench clear-cache` after `npm run build`."""
+	path = _os.path.join(_os.path.dirname(__file__), "public", asset)
+	try:
+		return f"/assets/eve_agent/{asset}?v={int(_os.path.getmtime(path))}"
+	except OSError:
+		return f"/assets/eve_agent/{asset}"
+
+
+app_include_js = _versioned("dist/eve_chat.js")
+app_include_css = _versioned("dist/eve_chat.css")
 boot_session = "eve_agent.boot.boot_session"
 
 # include js, css files in header of web template
