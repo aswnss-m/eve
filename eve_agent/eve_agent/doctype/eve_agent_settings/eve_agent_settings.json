@@ -7,6 +7,11 @@
  "field_order": [
   "falkordb_section",
   "redis_url",
+  "falkordb_host",
+  "falkordb_port",
+  "falkordb_username",
+  "falkordb_password",
+  "falkordb_tls",
   "browser_url",
   "column_break_sync",
   "graph_name",
@@ -53,11 +58,40 @@
   },
   {
    "default": "redis://127.0.0.1:6500",
-   "description": "The FalkorDB server, not the bench's own Redis. With a password: redis://:pass@host:port.",
+   "description": "The FalkorDB server, not the bench's own Redis. Blank: redis://127.0.0.1:6500. With a password: redis://:pass@host:port. FalkorDB Cloud: rediss://falkordb:pass@host:port, or fill the Host fields below.",
    "fieldname": "redis_url",
    "fieldtype": "Data",
-   "label": "FalkorDB Redis URL",
-   "reqd": 1
+   "label": "FalkorDB Redis URL"
+  },
+  {
+   "fieldname": "falkordb_host",
+   "fieldtype": "Data",
+   "label": "FalkorDB Host",
+   "description": "Alternative to the URL: fill Host and the fields below (FalkorDB Cloud: Connectivity tab, Endpoint). When Host is set, the URL above is ignored. Username and password may stay blank."
+  },
+  {
+   "fieldname": "falkordb_port",
+   "fieldtype": "Int",
+   "label": "FalkorDB Port",
+   "default": "6379"
+  },
+  {
+   "fieldname": "falkordb_username",
+   "fieldtype": "Data",
+   "label": "FalkorDB Username",
+   "description": "Cloud default: falkordb. Blank for a self-hosted server without auth or with only a password."
+  },
+  {
+   "fieldname": "falkordb_password",
+   "fieldtype": "Password",
+   "label": "FalkorDB Password"
+  },
+  {
+   "fieldname": "falkordb_tls",
+   "fieldtype": "Check",
+   "label": "Use TLS",
+   "default": "0",
+   "description": "On for FalkorDB Cloud paid tiers. Free tier and local Docker: off."
   },
   {
    "default": "http://127.0.0.1:4000",

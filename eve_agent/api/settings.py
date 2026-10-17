@@ -28,8 +28,8 @@ def module_names(client) -> set[str]:
 def test_connection() -> dict:
 	"""Ping the FalkorDB Redis configured in Eve Agent Settings."""
 	frappe.only_for("System Manager")
-	client = get_graph_client()
 	try:
+		client = get_graph_client()
 		client.ping()
 		info = client.redis.info("server").get("redis_version", "unknown")
 		has_graph = "graph" in module_names(client)

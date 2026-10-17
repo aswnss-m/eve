@@ -29,7 +29,7 @@ from eve_agent.chat.memory import memory_context, save_turn
 from eve_agent.chat.prompt import system_prompt
 from eve_agent.chat.tools import build_tools
 from eve_agent.sync.data_sync import active_data_graph
-from eve_agent.sync.schema_sync import DEFAULT_REDIS_URL, default_graph_name
+from eve_agent.sync.schema_sync import connection_url, default_graph_name
 
 logger = logging.getLogger(__name__)
 
@@ -69,7 +69,7 @@ def build_context(settings, question: str = "", chat_id: str = "") -> ToolContex
 		model=settings.llm_model or DEFAULT_MODEL,
 		api_key=settings.get_password("llm_api_key", raise_exception=False) or "",
 		base_url=settings.llm_base_url or "",
-		redis_url=settings.redis_url or DEFAULT_REDIS_URL,
+		redis_url=connection_url(settings),
 		data_graph=active_data_graph(settings),
 		schema_graph=settings.graph_name or default_graph_name("schema"),
 		memory_graph=settings.memory_graph_name or default_graph_name("memory"),

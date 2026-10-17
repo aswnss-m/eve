@@ -3,7 +3,7 @@
 import frappe
 from frappe.utils import now_datetime
 
-from eve_agent.falkor.connection import GraphClient
+from eve_agent.falkor.connection import GraphClient, build_url
 from eve_agent.falkor.importer.schema_import import import_schema
 from eve_agent.sync.meta_reader import read_doctype_metas
 
@@ -18,10 +18,23 @@ def default_graph_name(suffix: str) -> str:
 	return f"{frappe.local.site.replace('.', '_')}_{suffix}"
 
 
+def connection_url(settings) -> str:
+	"""Host set: build from the Host/Port/Username/Password/TLS fields. Otherwise the URL field."""
+	if settings.get("falkordb_host"):
+		return build_url(
+			settings.falkordb_host,
+			settings.falkordb_port,
+			settings.falkordb_username,
+			settings.get_password("falkordb_password", raise_exception=False),
+			settings.falkordb_tls,
+		)
+	return settings.redis_url or DEFAULT_REDIS_URL
+
+
 def get_graph_client(settings=None, graph_name: str | None = None) -> GraphClient:
 	settings = settings or frappe.get_single(SETTINGS_DOCTYPE)
 	graph_name = graph_name or settings.graph_name or default_graph_name("schema")
-	return GraphClient.from_url(settings.redis_url or DEFAULT_REDIS_URL, graph_name)
+	return GraphClient.from_url(connection_url(settings), graph_name)
 
 
 def publish_sync_done(kind: str, status: str, text: str) -> None:
