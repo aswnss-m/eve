@@ -66,6 +66,7 @@ const NEAR_BOTTOM_PX = 96;
 const props = defineProps({
 	chatId: { type: String, required: true },
 });
+const emit = defineEmits(["busy"]);
 
 const __ = window.__;
 const STARTERS = [
@@ -93,6 +94,8 @@ const composer = ref(null);
 let controller = null;
 
 const busy = computed(() => status.value === "submitted" || status.value === "streaming");
+// The header mascot reacts to this.
+watch(busy, (value) => emit("busy", value));
 
 function uid() {
 	return Math.random().toString(36).slice(2, 10);

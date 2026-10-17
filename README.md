@@ -248,12 +248,13 @@ eve_agent/
   boot.py            # tells the Desk whether to show Ask Eve
   demo/              # synthetic people-layer data for demos
   public/dist/       # built chat widget (committed; rebuild with `npm run build`)
+  public/mascot/     # Eve's face animations (see animations/INSTRUCTION.md before adding expressions)
   commands.py        # bench sync-schema / sync-data
 frontend/eve_chat/   # chat widget source (Vue 3, streams from the chat endpoint)
 docs/graph-guide.md  # graph model and Cypher recipes
 ```
 
-After changing `frontend/`, run `npm install && npm run build` in `apps/eve_agent`, and commit `eve_agent/public/dist`. Then `bench --site <site> clear-cache`: the widget's URL carries the build's timestamp, which is cached with the site's hooks, so browsers fetch the new file on the next reload.
+After changing `frontend/`, run `npm install && npm run build` in `apps/eve_agent`, and commit `eve_agent/public/dist`. The widget's URL carries the build's timestamp, read when `hooks.py` is imported, so the web process must restart: the build script touches `hooks.py` to trigger the dev server's reloader; in production run `bench restart` and `bench --site <site> clear-cache`. Browsers then fetch the new file on the next reload.
 
 To add an ERPNext/HRMS relationship, add a rule to `RULES` in `eve_agent/falkor/cypher/business_rules.py` (see the end of the graph guide), then resync the data graph. Every rule also carries `scoped` statements that the incremental sync runs for just the records that changed; the `rename`, `flow`, `derived` and `local` builders produce both forms from one query.
 
