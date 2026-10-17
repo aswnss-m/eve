@@ -3,10 +3,27 @@ env/bin/python -m unittest eve_agent.tests.test_falkor_pure  (from apps/eve_agen
 
 import unittest
 
+from eve_agent.falkor.connection import build_url
 from eve_agent.falkor.importer.schema_import import SchemaImportSummary
 from eve_agent.falkor.importer.schema_rows import build_doctype_row, build_edges
 from eve_agent.falkor.literals import to_literal, with_params
 from eve_agent.falkor.query.readonly import WriteQueryError, assert_read_only
+
+
+class BuildUrlTests(unittest.TestCase):
+	def test_no_auth(self):
+		self.assertEqual(build_url("h"), "redis://h:6379")
+		self.assertEqual(build_url("h", 6500, "", ""), "redis://h:6500")
+
+	def test_pasted_endpoint_overrides_port(self):
+		self.assertEqual(build_url("r-x.falkordb.cloud:51023", 6379, "falkordb", "pw"), "redis://falkordb:pw@r-x.falkordb.cloud:51023")
+		self.assertEqual(build_url("redis://127.0.0.1:6500/", 6379), "redis://127.0.0.1:6500")
+
+	def test_password_only(self):
+		self.assertEqual(build_url("h", 6500, None, "pw"), "redis://:pw@h:6500")
+
+	def test_user_password_tls_encoded(self):
+		self.assertEqual(build_url("h", 61234, "falkordb", "p@ss/", True), "rediss://falkordb:p%40ss%2F@h:61234")
 
 
 class LiteralTests(unittest.TestCase):

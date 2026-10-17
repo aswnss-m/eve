@@ -68,6 +68,7 @@ docker run -d --name falkordb --restart unless-stopped \
 - **Port 6500** is the FalkorDB server (Redis protocol). It's mapped away from 6379 so it can't clash with a local Redis.
 - **Port 4000** is the FalkorDB Browser UI.
 - The volume keeps the graphs across container restarts. Without it they are lost, but a resync rebuilds them.
+- **No Docker?** Create a free instance at [app.falkordb.cloud](https://app.falkordb.cloud). Host and port are on its **Connectivity** tab (Endpoint), user and password under **Instance Details → Parameter**. Enter them in the Host fields of step 3. The instance ID is only a console label; clients don't use it.
 
 Check it is up:
 
@@ -103,6 +104,10 @@ Open **Eve** workspace → **Eve Agent Settings**.
 | Setting                 | Default                  | Notes                                                                                                                       |
 | ----------------------- | ------------------------ | --------------------------------------------------------------------------------------------------------------------------- |
 | FalkorDB Redis URL      | `redis://127.0.0.1:6500` | The FalkorDB server from step 1. Include a password if you set one: `redis://:pass@host:port`                               |
+| FalkorDB Host / Port    | blank / 6379             | Alternative to the URL. When Host is set the URL is ignored. Local Docker: `127.0.0.1` / `6500`. Cloud: the Endpoint from the Connectivity tab |
+| FalkorDB Username       | blank                    | Blank for a server without auth or with only `--requirepass`. FalkorDB Cloud: `falkordb`                                     |
+| FalkorDB Password       | blank                    | Stored encrypted. Blank for a server without auth                                                                            |
+| Use TLS                 | off                      | On for FalkorDB Cloud paid tiers only. Free tier and local Docker have no TLS                                                 |
 | Schema Graph Name       | `<site>_schema`          | Leave blank for the default                                                                                                 |
 | FalkorDB Browser URL    | `http://127.0.0.1:4000`  | Used by the "Open FalkorDB Browser" button                                                                                  |
 | Data Graph Name         | `<site>_data`            | Record graph. Leave blank for the default                                                                                   |
@@ -213,6 +218,7 @@ bench --site <site> sync-data
 | Data sync fails with "Schema graph … is empty"            | Run **Sync Schema Now** (or `sync-schema`) first                                                                                                                              |
 | Test Connection fails                                     | FalkorDB isn't running or the URL is wrong. Check with `redis-cli -p 6500 PING`                                                                                               |
 | `graph module: no`                                        | The URL points at a plain Redis (e.g. the bench's own Redis), not FalkorDB                                                                                                    |
+| Test Connection fails with an SSL or certificate error    | **Use TLS** is on for a server without TLS (local Docker, Cloud Free tier), or off for a Cloud paid tier that has it                                                          |
 | Nodes exist but you see no edges                          | The query returns nodes only. Return paths (`MATCH p = … RETURN p`)                                                                                                           |
 | No Ask Eve button                                         | Your user lacks a **Chat Role**, **Enable Chat** is off, or the Desk was not reloaded after installing                                                                       |
 | Chat answers "You are not allowed to chat with Eve"       | Your roles aren't in **Chat Roles**, or **Enable Chat** is off                                                                                                                 |

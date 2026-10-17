@@ -8,6 +8,7 @@ published `falkordb` Python client needs redis 5+ or 8+, and Frappe pins 4.5.
 """
 
 from dataclasses import dataclass, field
+from urllib.parse import quote
 
 import redis
 
@@ -15,6 +16,15 @@ from eve_agent.falkor.literals import with_params
 from eve_agent.falkor.query.readonly import assert_read_only
 
 DEFAULT_TIMEOUT_SECONDS = 30
+
+
+def build_url(host: str, port=None, username=None, password=None, tls=False) -> str:
+	"""Redis URL from separate fields. Blank username and password mean no auth."""
+	host = host.strip().split("://")[-1].rstrip("/")
+	if ":" in host:  # a pasted Cloud endpoint "host:port" wins over the Port field
+		host, port = host.rsplit(":", 1)
+	auth = f"{quote(username or '', safe='')}:{quote(password or '', safe='')}@" if (username or password) else ""
+	return f"{'rediss' if tls else 'redis'}://{auth}{host}:{int(port or 6379)}"
 
 
 @dataclass
