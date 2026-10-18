@@ -422,7 +422,7 @@ The full build (`sync-data`) rebuilds everything. Between rebuilds the **increme
 1. The masters next to the record (customers, items, employees, vouchers...) are captured **before** anything is removed, by following the record's own outgoing edges that carry a `field` property, directly and through its child rows.
 2. The record's child-row nodes and every edge it owns (`LINKS_TO`, `HAS_CHILD`, and forward renames such as `FOR_CUSTOMER`, which keep `{field}`) are deleted. Records that no longer exist in the database are removed with their edges.
 3. The record is `MERGE`d (incoming edges survive) and its child rows, `HAS_CHILD` and `LINKS_TO` edges are recreated.
-4. Every business rule runs in its **scoped** form with `$names` (the records touched) and `$pivots` (the masters from step 1, plus those of the new version, plus the records themselves). Each scoped form is a delete + create pair with the same scope, so it never duplicates an edge:
+4. Every business rule runs in its **scoped** form with `$names` (the records touched, plus the child rows step 3 recreated) and `$pivots` (the masters from step 1, plus those of the new version, plus the records themselves). Each scoped form is a delete + create pair with the same scope, so it never duplicates an edge:
    - renames and flows re-derive the record's own named edges;
    - per-document aggregates (`CONTAINS`, `PAID_BY`, `CONSUMES`, `MANAGED_BY`) are recomputed for the touched documents;
    - cross-document aggregates (`BOUGHT`, `SUPPLIES`, `SOLD_TO`, `STOCKED_IN`, `POSTED_TO`, `EARNS`, `DEDUCTS`, `TOOK_LEAVE`, `ON_STRUCTURE`) are recomputed for the affected masters: a new or cancelled Sales Invoice recomputes every `BOUGHT` edge of its customer;

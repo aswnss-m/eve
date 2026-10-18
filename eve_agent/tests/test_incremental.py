@@ -126,8 +126,13 @@ class SyncKeysTests(unittest.TestCase):
 		self.assertEqual(len(rule_calls), 2)  # delete, then create
 		self.assertTrue(rule_calls[0][0].startswith("MATCH (c:Customer)-[r:BOUGHT]"))
 		self.assertEqual(set(rule_calls[0][1]["pivots"]), {"C-old", "SO-1"})
-		rename_calls = [(q, p) for q, p in client.queries if "FOR_CUSTOMER" in q]
-		self.assertEqual(rename_calls[0][1]["names"], ["SO-1"])
+
+	def test_rules_names_include_child_rows(self):
+		# Child rows come back with raw LINKS_TO edges; rules that rewrite them (drop hub edges,
+		# renames whose source is a child DocType) can only reach them through $names.
+		client, _ = self.run_sync([make_key("Sales Order", "SO-1")])
+		rename_calls = [p for q, p in client.queries if "FOR_CUSTOMER" in q]
+		self.assertEqual(rename_calls[0]["names"], ["SO-1", "row1"])
 
 	def test_gone_record_is_deleted_and_its_pivots_still_reach_rules(self):
 		client, summary = self.run_sync([make_key("Sales Order", "SO-gone")], pivots={"SO-gone": ["C9"]})

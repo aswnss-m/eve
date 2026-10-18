@@ -17,7 +17,8 @@ See docs/graph-guide.md for the resulting model and example queries.
 
 Each rule also carries `scoped` statements for the incremental sync
 (eve_agent/falkor/importer/incremental.py). They take two parameters:
-  $names   the records that were just upserted or deleted
+  $names   the records that were just upserted or deleted, plus the child rows
+           the upsert recreated (so rules that rewrite child-row edges reach them)
   $pivots  master records next to them (customers, items, employees...),
            captured before and after the upsert
 and are a delete + create pair with the same scope, so re-running them never

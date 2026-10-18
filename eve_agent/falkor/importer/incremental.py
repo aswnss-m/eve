@@ -8,7 +8,8 @@ records up to date in place, in the order described in the business rules module
   2. delete the records' child-row nodes and the edges they own (`field` property)
   3. delete records that no longer exist in the database
   4. MERGE the records (keeps incoming edges), recreate child rows, HAS_CHILD and LINKS_TO
-  5. run every business rule's scoped statements with $names and $pivots
+  5. run every business rule's scoped statements with $names (the records and their
+     new child rows) and $pivots
 
 Keys name a record as a JSON pair ["DocType", "name"] (names may contain anything).
 """
@@ -148,6 +149,7 @@ def sync_keys(
 	targets = plan.parent_names
 	child_edges: dict[tuple[str, str], list[dict]] = defaultdict(list)
 	link_edges: dict[tuple[str, str], list[dict]] = defaultdict(list)
+	row_names: list[str] = []
 
 	def collect_links(dt_plan: DocTypePlan, records: list[dict]) -> None:
 		for record in records:
@@ -177,6 +179,7 @@ def sync_keys(
 				client, dq.CREATE_RECORDS.format(label=dq.quote_label(child_name)), built
 			)
 			collect_links(child, child_rows)
+			row_names.extend(str(r["name"]) for r in child_rows)
 			child_edges[(doctype, child_name)].extend(
 				{"src": str(r["parent"]), "dst": str(r["name"]), "field": fieldname} for r in child_rows
 			)
@@ -193,5 +196,7 @@ def sync_keys(
 	names = [n for ns in by_doctype.values() for n in ns]
 	pivots |= set(names)
 
-	summary.rule_changes = apply_scoped_rules(client, names, sorted(pivots), rules).total
+	# The recreated child rows carry raw LINKS_TO edges again, so rules that rewrite them
+	# (drop hub edges, renames whose source is a child DocType) need them in $names too.
+	summary.rule_changes = apply_scoped_rules(client, names + row_names, sorted(pivots), rules).total
 	return summary
