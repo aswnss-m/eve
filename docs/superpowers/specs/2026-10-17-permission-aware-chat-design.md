@@ -95,7 +95,10 @@ A profile graph is built by the existing pipeline (`build_data_graph` / `import_
 - **Business relationships and totals:** the business rules run inside each profile graph on its own contents. A profile without Sales Invoices therefore gets no invoice-derived `BOUGHT`, `SOLD_TO`, `BILLED_BY` or `PAID_BY` edges.
 - **Special cases** among Eve's extra DocTypes:
   - **Comment:** included only when its reference document is in the profile graph. This matches Frappe's Comment permission rule.
-  - **User:** only the allow-listed fields (`FIELD_ALLOWLIST`). A user record is included when it is the owner of, or the author of a comment on, a record in the graph. Frappe itself sends these people's name and email (form load's `user_info`) when the user opens such a document, even though only System Manager can read the User DocType. *(Designer's call; see section 7.)*
+  - **User:** every System User, with only the allow-listed fields (`FIELD_ALLOWLIST`).
+    - Frappe already shows any desk user every enabled user's email and full name, through the @mention search (`frappe.desk.search.get_names_for_mentions`). That holds even though only System Manager can read the User DocType.
+    - Keeping all of them, rather than only owners and comment authors, also keeps `CREATED_BY` edges correct during incremental updates.
+    - *(Designer's call; amended 2026-10-18 while planning. See section 7.)*
   - **ToDo:** left out of every non-full profile in v1, because Frappe shows each person only their own ToDos.
 
 ### 3. Building and lifecycle
@@ -136,7 +139,7 @@ In `eve_agent/api/chat.py` (`stream`, `locate`) and `build_context`:
 6. **Safety net:** before any tool result goes to the model or the widget, every cited source is checked.
    - A document is checked with Frappe's own `frappe.has_permission(doctype, "read", doc=name, user=user)`. This check is broader than the profile rules (it also counts shares and owner access), so it never rejects a correct record. It only catches records that should not be in the graph.
    - A child-table row is checked through its parent document.
-   - A User source is checked against the section 2 rule instead: it must own, or have commented on, a record in the user's graph.
+   - A User source always passes, per the section 2 rule.
    - A failing source and the result rows naming it are removed, and an Error Log ("Eve: result outside the user's permissions") is written, because that means a profile graph bug.
    - `locate` uses the user's graph and the same check.
 7. **Memory:** `recall` and `memory_context` drop mentioned records the user can't currently read. Saved conversation text and insights stay, since that user was shown them before. *(Builder's call.)*
@@ -169,7 +172,7 @@ Calls made by the designer, which the builder may revisit if the code shows a be
 - the profile record is a DocType;
 - profiles are built lazily, with a "preparing" reply;
 - defaults of 14 days and 20 profiles;
-- User records are included for owners and comment authors;
+- all System Users are included, with allow-listed fields only, matching Frappe's @mention list;
 - memory keeps text but filters record mentions;
 - Eve says "needs access" rather than pretending data doesn't exist;
 - User Permissions follow Frappe's non-transitive, own-field semantics;
