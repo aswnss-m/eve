@@ -9,6 +9,7 @@ while a build runs bumps the record's `modified`, and the running build then sta
 """
 
 import time
+from collections import Counter
 from functools import partial
 
 import frappe
@@ -83,22 +84,16 @@ def _ready(row) -> bool:
 
 
 def _create(scope: AccessScope) -> bool:
-	"""Insert the profile, first evicting idle ones at the limit. False when all are in recent use."""
-	limit = cint(frappe.get_cached_doc(SETTINGS_DOCTYPE).get("max_access_profiles")) or DEFAULT_MAX_PROFILES
+	"""Insert the profile, first evicting others at the limit. False when all are mapped and in use."""
+	settings = frappe.get_cached_doc(SETTINGS_DOCTYPE)
+	limit = cint(settings.get("max_access_profiles")) or DEFAULT_MAX_PROFILES
 	excess = frappe.db.count(PROFILE_DOCTYPE) - limit + 1
 	if excess > 0:
-		idle_since = add_to_date(now_datetime(), hours=-EVICT_IDLE_HOURS)
-		idle = frappe.get_all(
-			PROFILE_DOCTYPE,
-			{"last_used_at": ("<", idle_since)},
-			pluck="name",
-			order_by="last_used_at asc",
-			limit=excess,
-		)
-		if len(idle) < excess:
+		evictable = _evictable(settings)[:excess]
+		if len(evictable) < excess:
 			_log_capacity(limit)
 			return False
-		for key in idle:
+		for key in evictable:
 			delete_profile(key)
 	profile = {
 		"doctype": PROFILE_DOCTYPE,
@@ -112,6 +107,16 @@ def _create(scope: AccessScope) -> bool:
 	except frappe.DuplicateEntryError:
 		pass  # another member's request created it a moment ago
 	return True
+
+
+def _evictable(settings) -> list[str]:
+	"""Profiles no chat user maps to (however recent), then those idle for a day, least recent first."""
+	members = member_counts(settings)
+	idle_since = add_to_date(now_datetime(), hours=-EVICT_IDLE_HOURS)
+	rows = frappe.get_all(PROFILE_DOCTYPE, fields=["name", "last_used_at"], order_by="last_used_at asc")
+	unmapped = [r.name for r in rows if r.name not in members]
+	idle = [r.name for r in rows if r.name in members and (r.last_used_at or idle_since) <= idle_since]
+	return unmapped + idle
 
 
 def _log_capacity(limit: int) -> None:
@@ -141,12 +146,17 @@ def _summary(scope: AccessScope) -> str:
 # --- Builds ------------------------------------------------------------------
 
 
-def _request_build(key: str) -> None:
-	"""Queue a build unless one is queued or running. The job is queued when the transaction commits."""
+def _request_build(key: str, restart: bool = False) -> None:
+	"""Queue a build unless one is queued or running; the job is queued when the transaction commits.
+
+	With `restart` (a rebuild request, not a member asking), a build already running starts over, so
+	it cannot finish with settings older than the request."""
 	flag = build_flag(key)
 	if frappe.cache.set(flag, 1, nx=True, ex=BUILD_TIMEOUT_SECONDS):
 		frappe.db.after_rollback.add(partial(frappe.cache.delete, flag))
 		enqueue_profile_build(key)
+	elif restart:
+		frappe.db.set_value(PROFILE_DOCTYPE, key, "modified", now_datetime(), update_modified=False)
 
 
 def enqueue_profile_build(key: str) -> None:
@@ -163,34 +173,45 @@ def enqueue_profile_build(key: str) -> None:
 
 def run_profile_build(key: str) -> str:
 	"""Background job: build the profile's graph into the slot readers are not using, then switch."""
+	row = None
 	try:
 		for _ in range(BUILD_ATTEMPTS):
-			text = _build_once(key)
+			fields = ["status", "scope_json", "active_graph", "modified"]
+			row = frappe.db.get_value(PROFILE_DOCTYPE, key, fields, as_dict=True)
+			if not row:
+				return "Skipped: the profile no longer exists"
+			text = _build_once(key, row)
 			if text is not None:
 				return text
 		return "Skipped: the profile changed during every attempt"
 	except Exception as exc:
-		text = f"{type(exc).__name__}: {exc}"
-		failed = {"status": "Failed", "last_error": text}
-		frappe.db.set_value(PROFILE_DOCTYPE, key, failed, update_modified=False)
-		frappe.log_error(
-			title="Eve Agent: access profile build failed",
-			reference_doctype=PROFILE_DOCTYPE,
-			reference_name=key,
-		)
-		frappe.db.commit()
-		return text
+		return _record_failure(key, row, exc)
 	finally:
 		frappe.cache.delete(build_flag(key))
 
 
-def _build_once(key: str) -> str | None:
+def _record_failure(key: str, started, exc: Exception) -> str:
+	"""A Ready profile nobody marked for rebuild keeps serving its graph; any other build goes Failed."""
+	text = f"{type(exc).__name__}: {exc}"
+	fields = ["status", "modified"]
+	current = frappe.db.get_value(PROFILE_DOCTYPE, key, fields, as_dict=True, for_update=True)
+	keep = bool(started and current) and started.status == current.status == "Ready"
+	keep = keep and current.modified == started.modified
+	values = {"last_error": text} if keep else {"status": "Failed", "last_error": text}
+	frappe.db.set_value(PROFILE_DOCTYPE, key, values, update_modified=False)
+	frappe.log_error(
+		title="Eve Agent: access profile build failed",
+		reference_doctype=PROFILE_DOCTYPE,
+		reference_name=key,
+	)
+	frappe.db.commit()
+	return text
+
+
+def _build_once(key: str, row) -> str | None:
 	"""One attempt, as _run_data_sync does it. None when the profile was marked for rebuild meanwhile."""
 	from eve_agent.sync.refresh import GRAPH_WRITE_LOCK
 
-	row = frappe.db.get_value(PROFILE_DOCTYPE, key, ["scope_json", "active_graph", "modified"], as_dict=True)
-	if not row:
-		return "Skipped: the profile no longer exists"
 	settings = frappe.get_single(SETTINGS_DOCTYPE)
 	scope = AccessScope.from_json(row.scope_json)
 	first, second = profile_graph_names(settings, key)
@@ -211,6 +232,7 @@ def _build_once(key: str) -> str | None:
 				"status": "Ready",
 				"active_graph": target,
 				"last_built_at": now_datetime(),
+				"graph_size": _graph_size(settings, target),
 				"last_error": None,
 				"waiting_users": None,
 			}
@@ -223,7 +245,22 @@ def _build_once(key: str) -> str | None:
 		return None
 	for user in parse_lines(current.waiting_users):
 		frappe.publish_realtime("msgprint", READY_MESSAGE, user=user)
+	if not row.active_graph:  # A new profile: others may have just lost their last member (spec §3).
+		try:
+			sweep_unmapped(settings)
+		except Exception:
+			frappe.log_error(title="Eve Agent: access profile sweep failed")
 	return text
+
+
+def _graph_size(settings, graph_name: str) -> str | None:
+	"""For admins, best effort: FalkorDB's estimate of the graph's memory, e.g. "10 MB"."""
+	try:
+		client = get_graph_client(settings, graph_name)
+		reply = client.redis.execute_command("GRAPH.MEMORY", "USAGE", graph_name)
+		return f"{dict(zip(reply[::2], reply[1::2], strict=False))['total_graph_sz_mb']} MB"
+	except Exception:
+		return None
 
 
 def ready_profiles() -> list[dict]:
@@ -244,7 +281,7 @@ def mark_all_pending_and_rebuild() -> None:
 def enqueue_profile_rebuilds() -> None:
 	"""After a main graph rebuild: Ready profiles rebuild into their other slot and stay Ready meanwhile."""
 	for key in frappe.get_all(PROFILE_DOCTYPE, {"status": "Ready"}, pluck="name"):
-		_request_build(key)
+		_request_build(key, restart=True)
 
 
 # --- Clean-up ----------------------------------------------------------------
@@ -269,19 +306,30 @@ def drop_graphs(key: str, active_graph: str | None = None) -> None:
 		get_graph_client(settings, name).delete_graph()
 
 
+def member_counts(settings) -> Counter:
+	"""Profile key -> how many enabled users with a Chat Role map to it."""
+	plan = load_plan(settings)
+	users = frappe.get_all("User", {"enabled": 1}, pluck="name")
+	return Counter(resolve_scope(user, plan).key for user in users if chat_allowed(settings, user))
+
+
+def sweep_unmapped(settings) -> None:
+	"""Delete the profiles no enabled chat user maps to any more; record the others' member counts."""
+	members = member_counts(settings)
+	for key in frappe.get_all(PROFILE_DOCTYPE, pluck="name"):
+		if key in members:
+			frappe.db.set_value(PROFILE_DOCTYPE, key, "member_count", members[key], update_modified=False)
+		else:
+			delete_profile(key)
+		frappe.db.commit()  # Graphs are dropped at once: keep each record deletion with them.
+
+
 def cleanup_profiles() -> None:
 	"""Daily: delete profiles unused for the retention period, then those no enabled chat user maps to."""
 	settings = frappe.get_single(SETTINGS_DOCTYPE)
 	days = cint(settings.get("access_profile_retention_days")) or DEFAULT_RETENTION_DAYS
 	unused_since = add_days(now_datetime(), -days)
-	_delete_each(frappe.get_all(PROFILE_DOCTYPE, {"last_used_at": ("<", unused_since)}, pluck="name"))
-	plan = load_plan(settings)
-	users = frappe.get_all("User", {"enabled": 1}, pluck="name")
-	mapped = {resolve_scope(user, plan).key for user in users if chat_allowed(settings, user)}
-	_delete_each(key for key in frappe.get_all(PROFILE_DOCTYPE, pluck="name") if key not in mapped)
-
-
-def _delete_each(keys) -> None:
-	for key in keys:
+	for key in frappe.get_all(PROFILE_DOCTYPE, {"last_used_at": ("<", unused_since)}, pluck="name"):
 		delete_profile(key)
-		frappe.db.commit()  # Graphs are dropped at once: keep each record deletion with them.
+		frappe.db.commit()
+	sweep_unmapped(settings)

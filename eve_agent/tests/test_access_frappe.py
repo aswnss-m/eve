@@ -532,7 +532,21 @@ class ProfileLifecycleTests(FrappeTestCase):
 
 	def profile(self, key):
 		fields = ["status", "active_graph", "waiting_users", "last_error", "scope_json"]
+		fields += ["member_count", "graph_size"]
 		return frappe.db.get_value(PROFILE_DOCTYPE, key, fields, as_dict=True)
+
+	def make_ready(self, scope, user) -> str:
+		"""A Ready profile on its first slot (a tiny graph) with no build in flight, as after a build."""
+		self.ask(scope, user)
+		graph = profile_graph_names(self.settings, scope.key)[0]
+		self.make_graph(graph)
+		frappe.db.set_value(PROFILE_DOCTYPE, scope.key, {"status": "Ready", "active_graph": graph})
+		self.clear_flags()
+		return graph
+
+	def fake_build(self, settings, scope, graph_name):
+		self.make_graph(graph_name)
+		return "built"
 
 	def builds(self) -> int:
 		method = "eve_agent.access.profiles.run_profile_build"
@@ -572,23 +586,26 @@ class ProfileLifecycleTests(FrappeTestCase):
 		self.assertEqual(self.profile(self.scope.key).waiting_users.split("\n"), [self.rahul, self.ananya])
 
 	def test_build_makes_profile_ready(self):
-		key = self.scope.key
+		# priya has a Chat Role: a first build drops profiles no chat user maps to, such as rahul's.
+		scope, key = self.priya_scope, self.priya_scope.key
 		first, second = profile_graph_names(self.settings, key)
-		self.ask(self.scope, self.rahul)
+		self.ask(scope, self.priya)
 		with patch("frappe.publish_realtime") as publish:
 			run_profile_build(key)
-		publish.assert_called_once_with("msgprint", READY_MESSAGE, user=self.rahul)
+		publish.assert_called_once_with("msgprint", READY_MESSAGE, user=self.priya)
 		profile = self.profile(key)
 		self.assertEqual((profile.status, profile.active_graph), ("Ready", first))
 		self.assertFalse(profile.waiting_users)
-		self.assertEqual(self.ask(self.scope, self.rahul), (first, None))
+		self.assertRegex(profile.graph_size, r"^\d+ MB$")
+		self.assertGreaterEqual(profile.member_count, 1)
+		self.assertEqual(self.ask(scope, self.priya), (first, None))
 		self.assertIn(first, self.graphs())
 		# A rebuild after a main sync goes into the other slot; the old one is served meanwhile.
 		enqueue_profile_rebuilds()
 		self.assertEqual(self.builds(), 2)
-		self.assertEqual(self.ask(self.scope, self.rahul), (first, None))
+		self.assertEqual(self.ask(scope, self.priya), (first, None))
 		run_profile_build(key)
-		self.assertEqual(self.ask(self.scope, self.rahul), (second, None))
+		self.assertEqual(self.ask(scope, self.priya), (second, None))
 		self.assertLessEqual({first, second}, self.graphs())
 
 	def test_failed_build_marks_failed_and_retries(self):
@@ -605,16 +622,34 @@ class ProfileLifecycleTests(FrappeTestCase):
 		self.assertEqual(self.ask(self.scope, self.rahul), (None, FAILED_MESSAGE))
 		self.assertEqual(self.builds(), 2)  # the next question retries
 
+	def test_failed_rebuild_keeps_ready_profile(self):
+		key = self.priya_scope.key
+		graph = self.make_ready(self.priya_scope, self.priya)
+		down = RuntimeError("FalkorDB is down")
+		failing = patch("eve_agent.access.profiles.build_profile_graph", side_effect=down)
+		with patch("frappe.log_error") as log_error, failing:
+			run_profile_build(key)
+			log_error.assert_called_once()
+			profile = self.profile(key)
+			self.assertEqual(profile.status, "Ready")
+			self.assertIn("FalkorDB is down", profile.last_error)
+			self.assertEqual(self.ask(self.priya_scope, self.priya), (graph, None))
+			# Marked for rebuild (say a permlevel change), the old graph may show too much: Failed.
+			mark_all_pending_and_rebuild()
+			self.clear_flags()
+			run_profile_build(key)
+			self.assertEqual(self.profile(key).status, "Failed")
+
 	def test_capacity_refuses_when_all_recent(self):
 		self.require_no_other_profiles()
 		self.set_setting("max_access_profiles", 1)
-		self.ask(self.scope, self.rahul)
+		self.ask(self.priya_scope, self.priya)
 		with patch("frappe.log_error") as log_error:
 			self.assertEqual(self.ask(self.meera_scope, self.meera), (None, CAPACITY_MESSAGE))
 			self.assertEqual(self.ask(self.meera_scope, self.meera), (None, CAPACITY_MESSAGE))
 		log_error.assert_called_once()  # at most once an hour
 		self.assertFalse(frappe.db.exists(PROFILE_DOCTYPE, self.meera_scope.key))
-		self.assertTrue(frappe.db.exists(PROFILE_DOCTYPE, self.scope.key))
+		self.assertTrue(frappe.db.exists(PROFILE_DOCTYPE, self.priya_scope.key))
 		self.assertEqual(self.builds(), 1)
 
 	def test_capacity_evicts_least_recently_used_idle_profile(self):
@@ -624,9 +659,19 @@ class ProfileLifecycleTests(FrappeTestCase):
 		self.ask(self.priya_scope, self.priya)
 		for key, days in ((self.scope.key, 3), (self.priya_scope.key, 2)):
 			frappe.db.set_value(PROFILE_DOCTYPE, key, "last_used_at", add_days(now_datetime(), -days))
-		self.assertEqual(self.ask(self.meera_scope, self.meera), (None, PREPARING_MESSAGE))
+		mapped = {self.scope.key: 1, self.priya_scope.key: 1}  # rahul has no Chat Role: count him in
+		with patch("eve_agent.access.profiles.member_counts", return_value=mapped):
+			self.assertEqual(self.ask(self.meera_scope, self.meera), (None, PREPARING_MESSAGE))
 		self.assertFalse(frappe.db.exists(PROFILE_DOCTYPE, self.scope.key))
 		self.assertTrue(frappe.db.exists(PROFILE_DOCTYPE, self.priya_scope.key))
+
+	def test_capacity_evicts_unmapped_profile_used_just_now(self):
+		self.require_no_other_profiles()
+		self.set_setting("max_access_profiles", 1)
+		self.ask(replace(self.scope, key=self.UNMAPPED_KEY), self.rahul)
+		self.assertEqual(self.ask(self.meera_scope, self.meera), (None, PREPARING_MESSAGE))
+		self.assertFalse(frappe.db.exists(PROFILE_DOCTYPE, self.UNMAPPED_KEY))
+		self.assertTrue(frappe.db.exists(PROFILE_DOCTYPE, self.meera_scope.key))
 
 	def test_cleanup_drops_unmapped_and_stale(self):
 		stale, kept = self.priya_scope, self.meera_scope  # priya and meera have a Chat Role
@@ -644,13 +689,25 @@ class ProfileLifecycleTests(FrappeTestCase):
 			self.assertFalse(set(profile_graph_names(self.settings, key)) & graphs)
 		self.assertTrue(frappe.db.exists(PROFILE_DOCTYPE, kept.key))
 		self.assertLessEqual(set(profile_graph_names(self.settings, kept.key)), graphs)
+		self.assertGreaterEqual(self.profile(kept.key).member_count, 1)
+
+	def test_first_build_drops_unmapped_profiles(self):
+		unmapped = replace(self.scope, key=self.UNMAPPED_KEY)
+		self.ask(unmapped, self.rahul)
+		for name in profile_graph_names(self.settings, unmapped.key):
+			self.make_graph(name)
+		self.ask(self.priya_scope, self.priya)
+		with patch("eve_agent.access.profiles.build_profile_graph", self.fake_build):
+			run_profile_build(self.priya_scope.key)
+		self.assertFalse(frappe.db.exists(PROFILE_DOCTYPE, unmapped.key))
+		self.assertFalse(set(profile_graph_names(self.settings, unmapped.key)) & self.graphs())
+		profile = self.profile(self.priya_scope.key)
+		self.assertEqual(profile.status, "Ready")
+		self.assertGreaterEqual(profile.member_count, 1)
 
 	def test_mark_all_pending(self):
 		self.ask(self.scope, self.rahul)
-		self.ask(self.meera_scope, self.meera)
-		graph = profile_graph_names(self.settings, self.meera_scope.key)[0]
-		frappe.db.set_value(PROFILE_DOCTYPE, self.meera_scope.key, {"status": "Ready", "active_graph": graph})
-		self.clear_flags()  # as when both first builds have finished
+		self.make_ready(self.meera_scope, self.meera)  # also clears the flags, as after both first builds
 		mark_all_pending_and_rebuild()
 		self.assertEqual(set(frappe.get_all(PROFILE_DOCTYPE, pluck="status")), {"Pending"})
 		self.assertEqual(self.builds(), 4)
@@ -658,22 +715,42 @@ class ProfileLifecycleTests(FrappeTestCase):
 
 	def test_rebuild_requested_during_a_build_starts_it_over(self):
 		"""E.g. a permlevel change while the build runs: the graph built before it is never served."""
-		key = self.scope.key
-		self.ask(self.scope, self.rahul)
+		key = self.priya_scope.key
+		self.ask(self.priya_scope, self.priya)
 		built = []
 
 		def build(settings, scope, graph_name):
 			built.append(graph_name)
 			if len(built) == 1:
 				mark_all_pending_and_rebuild()
-			self.make_graph(graph_name)
-			return "built"
+			return self.fake_build(settings, scope, graph_name)
 
 		with patch("eve_agent.access.profiles.build_profile_graph", build):
 			run_profile_build(key)
 		self.assertEqual(len(built), 2)
 		self.assertEqual(self.profile(key).status, "Ready")
 		self.assertEqual(self.builds(), 1)  # the running build started over; nothing else was queued
+
+	def test_rebuild_requested_during_an_in_place_rebuild_starts_it_over(self):
+		"""E.g. a main sync finishing while the profile rebuilds: the rebuild must not end on older data."""
+		key = self.priya_scope.key
+		first, second = profile_graph_names(self.settings, key)
+		self.make_ready(self.priya_scope, self.priya)
+		enqueue_profile_rebuilds()
+		self.assertEqual(self.builds(), 2)  # the first question, then this rebuild
+		built = []
+
+		def build(settings, scope, graph_name):
+			built.append(graph_name)
+			if len(built) == 1:
+				enqueue_profile_rebuilds()  # while this build is in flight
+			return self.fake_build(settings, scope, graph_name)
+
+		with patch("eve_agent.access.profiles.build_profile_graph", build):
+			run_profile_build(key)
+		self.assertEqual(built, [second, second])
+		self.assertEqual(self.builds(), 2)  # not queued again: the running build started over
+		self.assertEqual(self.ask(self.priya_scope, self.priya), (second, None))
 
 	def test_profile_deleted_during_its_build_leaves_no_graph(self):
 		key = self.scope.key

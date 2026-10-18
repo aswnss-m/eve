@@ -10,8 +10,10 @@
   "key",
   "status",
   "summary",
+  "member_count",
   "column_break_graph",
   "active_graph",
+  "graph_size",
   "last_built_at",
   "last_used_at",
   "detail_section",
@@ -30,7 +32,7 @@
   },
   {
    "default": "Pending",
-   "description": "Only a Ready profile is used. Until then (Pending, or Failed and retried at the next question), Eve answers its members with a short message.",
+   "description": "Only a Ready profile is used. Until then (Pending, or Failed and retried at the next question), Eve answers its members with a short message. A failed rebuild of a Ready profile keeps it Ready and records the error.",
    "fieldname": "status",
    "fieldtype": "Select",
    "in_list_view": 1,
@@ -48,6 +50,14 @@
    "read_only": 1
   },
   {
+   "description": "Enabled users with a Chat Role who map to this profile, as of the last clean-up or new profile build.",
+   "fieldname": "member_count",
+   "fieldtype": "Int",
+   "in_list_view": 1,
+   "label": "Members",
+   "read_only": 1
+  },
+  {
    "fieldname": "column_break_graph",
    "fieldtype": "Column Break"
   },
@@ -56,6 +66,13 @@
    "fieldname": "active_graph",
    "fieldtype": "Data",
    "label": "Active Graph",
+   "read_only": 1
+  },
+  {
+   "description": "FalkorDB's estimate of the active graph's memory after its last build.",
+   "fieldname": "graph_size",
+   "fieldtype": "Data",
+   "label": "Graph Size",
    "read_only": 1
   },
   {
@@ -98,7 +115,7 @@
  ],
  "in_create": 1,
  "links": [],
- "modified": "2026-10-18 12:00:00.000000",
+ "modified": "2026-10-18 15:00:00.000000",
  "modified_by": "Administrator",
  "module": "Eve Agent",
  "name": "Eve Access Profile",
