@@ -402,7 +402,7 @@ Production passwords are shared outside this repo.
 
 | What                                                   | Where                                                      | Username        | Password                                                     |
 | ------------------------------------------------------ | ---------------------------------------------------------- | --------------- | ------------------------------------------------------------ |
-| ERP, Administrator | [http://167.235.241.112:8080](http://167.235.241.112:8080) | `Administrator` | admin_ |
+| ERP, Administrator | [http://167.235.241.112:8080](http://167.235.241.112:8080) | `Administrator` | admin |
 | FalkorDB Browser, login gate | [http://167.235.241.112:4000](http://167.235.241.112:4000) | `eve-erp` | sM4NFZYdGU6EyVwVqoyt |
 | FalkorDB Browser, database connection (after the gate) | the browser's login page                                   | blank           | blank; host `localhost`, port `6379`                         |
 | Server shell                                           | `ssh ssw@167.235.241.112`                                  | `ssw`           | SSH key, no password; `ssw` can run `docker`                 |
