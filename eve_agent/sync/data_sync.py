@@ -115,6 +115,7 @@ def run_data_sync() -> str:
 
 
 def _run_data_sync() -> str:
+	from eve_agent.access.profiles import enqueue_profile_rebuilds
 	from eve_agent.sync.refresh import GRAPH_WRITE_LOCK
 
 	settings = frappe.get_single(SETTINGS_DOCTYPE)
@@ -145,6 +146,12 @@ def _run_data_sync() -> str:
 	frappe.db.set_single_value(SETTINGS_DOCTYPE, values)
 	frappe.db.commit()
 	publish_sync_done("data", status, text)
+	if status == "Success":
+		# Profile graphs follow the main one. Queueing them never turns this sync into a failure.
+		try:
+			enqueue_profile_rebuilds()
+		except Exception:
+			frappe.log_error(title="Eve Agent: could not queue access profile rebuilds")
 	return text
 
 

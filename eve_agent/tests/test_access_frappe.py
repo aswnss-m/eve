@@ -6,6 +6,7 @@ They use the seeded demo users (`<name>@eve-demo.local`) and skip when those are
 
 import re
 import unittest
+from contextlib import ExitStack
 from dataclasses import replace
 from unittest.mock import patch
 
@@ -13,16 +14,32 @@ import frappe
 import frappe.share
 from frappe.core.doctype.user.user import STANDARD_USERS
 from frappe.tests.utils import FrappeTestCase
-from frappe.utils import add_days, today
+from frappe.utils import add_days, now_datetime, today
 from frappe.utils.nestedset import get_root_of
 
 from eve_agent.access.build import build_profile_graph, profile_graph_names
+from eve_agent.access.profiles import (
+	CAPACITY_LOG_FLAG,
+	CAPACITY_MESSAGE,
+	FAILED_MESSAGE,
+	PREPARING_MESSAGE,
+	PROFILE_DOCTYPE,
+	READY_MESSAGE,
+	build_flag,
+	cleanup_profiles,
+	delete_profile,
+	enqueue_profile_rebuilds,
+	ensure_ready,
+	mark_all_pending_and_rebuild,
+	run_profile_build,
+)
 from eve_agent.access.reader import ProfileReader
 from eve_agent.access.resolve import hook_restricted, is_own_record, resolve_scope
-from eve_agent.access.scope import SPECIAL_DROP, SPECIAL_KEEP, filter_plan
+from eve_agent.access.scope import SPECIAL_DROP, SPECIAL_KEEP, AccessScope, filter_plan
 from eve_agent.falkor.importer.data_rows import FIELD_ALLOWLIST, STANDARD_FIELDS
+from eve_agent.falkor.importer.incremental import IncrementalSummary
 from eve_agent.sync import record_reader
-from eve_agent.sync.data_sync import base_data_graph, build_data_graph, load_plan
+from eve_agent.sync.data_sync import _run_data_sync, base_data_graph, build_data_graph, load_plan
 from eve_agent.sync.schema_sync import get_graph_client
 
 TEST_TERRITORY = "Eve Test South"
@@ -463,3 +480,238 @@ class ProfileGraphTests(FrappeTestCase):
 		self.assertTrue(all(records))
 		self.assertEqual(records[0].group(1), records[1].group(1))
 		self.assertGreater(int(records[0].group(1)), int(re.search(r"records: (\d+)", self.summary).group(1)))
+
+
+class ProfileLifecycleTests(FrappeTestCase):
+	"""No build reaches the running worker (ruling R3): frappe.enqueue is patched, tests run builds directly.
+
+	run_profile_build commits, so tearDown deletes every profile a test made and commits as well.
+	"""
+
+	UNMAPPED_KEY = "evetestunmapped"
+
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		cls.settings = frappe.get_single("Eve Agent Settings")
+		try:
+			get_graph_client(cls.settings).ping()
+		except Exception:
+			raise unittest.SkipTest("FalkorDB is not reachable") from None
+		cls.rahul, cls.ananya = seeded_user("rahul"), seeded_user("ananya")
+		cls.priya, cls.meera = seeded_user("priya"), seeded_user("meera")
+		plan = data_plan()
+		cls.scope = resolve_scope(cls.rahul, plan)
+		cls.priya_scope = resolve_scope(cls.priya, plan)
+		cls.meera_scope = resolve_scope(cls.meera, plan)
+		cls.all_keys = (cls.scope.key, cls.priya_scope.key, cls.meera_scope.key, cls.UNMAPPED_KEY)
+
+	def setUp(self):
+		self.keys = set()
+		self.saved = {}
+		self.enqueue = patch("frappe.enqueue").start()
+		self.addCleanup(patch.stopall)
+		self.clear_flags()
+
+	def tearDown(self):
+		for key in self.keys:
+			delete_profile(key)
+		if self.saved:
+			frappe.db.set_single_value("Eve Agent Settings", self.saved)
+		frappe.db.commit()
+		self.clear_flags()
+
+	def clear_flags(self):
+		for key in self.all_keys:
+			frappe.cache.delete(build_flag(key))
+		frappe.cache.delete(frappe.cache.make_key(CAPACITY_LOG_FLAG))
+
+	def ask(self, scope, user):
+		self.keys.add(scope.key)
+		return ensure_ready(scope, user)
+
+	def profile(self, key):
+		fields = ["status", "active_graph", "waiting_users", "last_error", "scope_json"]
+		return frappe.db.get_value(PROFILE_DOCTYPE, key, fields, as_dict=True)
+
+	def builds(self) -> int:
+		method = "eve_agent.access.profiles.run_profile_build"
+		return sum(c.args[0] == method for c in self.enqueue.call_args_list)
+
+	def graphs(self) -> set[str]:
+		return set(get_graph_client(self.settings).redis.execute_command("GRAPH.LIST"))
+
+	def make_graph(self, name):
+		get_graph_client(self.settings, name).query("CREATE (:EveTest)")
+
+	def set_setting(self, field, value):
+		self.saved.setdefault(field, frappe.db.get_single_value("Eve Agent Settings", field))
+		frappe.db.set_single_value("Eve Agent Settings", field, value)
+
+	def require_no_other_profiles(self):
+		if frappe.db.count(PROFILE_DOCTYPE):
+			self.skipTest("other Eve Access Profiles exist on this site")
+
+	def test_first_question_returns_preparing(self):
+		before = frappe.db.count(PROFILE_DOCTYPE)
+		self.assertEqual(self.ask(self.scope, self.rahul), (None, PREPARING_MESSAGE))
+		self.assertEqual(frappe.db.count(PROFILE_DOCTYPE), before + 1)
+		profile = self.profile(self.scope.key)
+		self.assertEqual(profile.status, "Pending")
+		self.assertEqual(profile.waiting_users, self.rahul)
+		self.assertEqual(AccessScope.from_json(profile.scope_json), self.scope)
+		self.assertEqual(self.builds(), 1)
+
+	def test_ensure_ready_dedupes_builds(self):
+		before = frappe.db.count(PROFILE_DOCTYPE)
+		self.ask(self.scope, self.rahul)
+		self.assertEqual(self.ask(self.scope, self.ananya), (None, PREPARING_MESSAGE))  # same access
+		self.ask(self.scope, self.rahul)
+		self.assertEqual(self.builds(), 1)
+		self.assertEqual(frappe.db.count(PROFILE_DOCTYPE), before + 1)
+		self.assertEqual(self.profile(self.scope.key).waiting_users.split("\n"), [self.rahul, self.ananya])
+
+	def test_build_makes_profile_ready(self):
+		key = self.scope.key
+		first, second = profile_graph_names(self.settings, key)
+		self.ask(self.scope, self.rahul)
+		with patch("frappe.publish_realtime") as publish:
+			run_profile_build(key)
+		publish.assert_called_once_with("msgprint", READY_MESSAGE, user=self.rahul)
+		profile = self.profile(key)
+		self.assertEqual((profile.status, profile.active_graph), ("Ready", first))
+		self.assertFalse(profile.waiting_users)
+		self.assertEqual(self.ask(self.scope, self.rahul), (first, None))
+		self.assertIn(first, self.graphs())
+		# A rebuild after a main sync goes into the other slot; the old one is served meanwhile.
+		enqueue_profile_rebuilds()
+		self.assertEqual(self.builds(), 2)
+		self.assertEqual(self.ask(self.scope, self.rahul), (first, None))
+		run_profile_build(key)
+		self.assertEqual(self.ask(self.scope, self.rahul), (second, None))
+		self.assertLessEqual({first, second}, self.graphs())
+
+	def test_failed_build_marks_failed_and_retries(self):
+		key = self.scope.key
+		self.ask(self.scope, self.rahul)
+		down = RuntimeError("FalkorDB is down")
+		with patch("frappe.log_error") as log_error:
+			with patch("eve_agent.access.profiles.build_profile_graph", side_effect=down):
+				run_profile_build(key)
+		log_error.assert_called_once()
+		profile = self.profile(key)
+		self.assertEqual(profile.status, "Failed")
+		self.assertIn("FalkorDB is down", profile.last_error)
+		self.assertEqual(self.ask(self.scope, self.rahul), (None, FAILED_MESSAGE))
+		self.assertEqual(self.builds(), 2)  # the next question retries
+
+	def test_capacity_refuses_when_all_recent(self):
+		self.require_no_other_profiles()
+		self.set_setting("max_access_profiles", 1)
+		self.ask(self.scope, self.rahul)
+		with patch("frappe.log_error") as log_error:
+			self.assertEqual(self.ask(self.meera_scope, self.meera), (None, CAPACITY_MESSAGE))
+			self.assertEqual(self.ask(self.meera_scope, self.meera), (None, CAPACITY_MESSAGE))
+		log_error.assert_called_once()  # at most once an hour
+		self.assertFalse(frappe.db.exists(PROFILE_DOCTYPE, self.meera_scope.key))
+		self.assertTrue(frappe.db.exists(PROFILE_DOCTYPE, self.scope.key))
+		self.assertEqual(self.builds(), 1)
+
+	def test_capacity_evicts_least_recently_used_idle_profile(self):
+		self.require_no_other_profiles()
+		self.set_setting("max_access_profiles", 2)
+		self.ask(self.scope, self.rahul)
+		self.ask(self.priya_scope, self.priya)
+		for key, days in ((self.scope.key, 3), (self.priya_scope.key, 2)):
+			frappe.db.set_value(PROFILE_DOCTYPE, key, "last_used_at", add_days(now_datetime(), -days))
+		self.assertEqual(self.ask(self.meera_scope, self.meera), (None, PREPARING_MESSAGE))
+		self.assertFalse(frappe.db.exists(PROFILE_DOCTYPE, self.scope.key))
+		self.assertTrue(frappe.db.exists(PROFILE_DOCTYPE, self.priya_scope.key))
+
+	def test_cleanup_drops_unmapped_and_stale(self):
+		stale, kept = self.priya_scope, self.meera_scope  # priya and meera have a Chat Role
+		unmapped = replace(self.scope, key=self.UNMAPPED_KEY)
+		self.assertNotEqual(stale.key, kept.key)
+		for scope, user in ((stale, self.priya), (kept, self.meera), (unmapped, self.rahul)):
+			self.ask(scope, user)
+			for name in profile_graph_names(self.settings, scope.key):
+				self.make_graph(name)
+		frappe.db.set_value(PROFILE_DOCTYPE, stale.key, "last_used_at", add_days(now_datetime(), -15))
+		cleanup_profiles()
+		graphs = self.graphs()
+		for key in (stale.key, unmapped.key):
+			self.assertFalse(frappe.db.exists(PROFILE_DOCTYPE, key))
+			self.assertFalse(set(profile_graph_names(self.settings, key)) & graphs)
+		self.assertTrue(frappe.db.exists(PROFILE_DOCTYPE, kept.key))
+		self.assertLessEqual(set(profile_graph_names(self.settings, kept.key)), graphs)
+
+	def test_mark_all_pending(self):
+		self.ask(self.scope, self.rahul)
+		self.ask(self.meera_scope, self.meera)
+		graph = profile_graph_names(self.settings, self.meera_scope.key)[0]
+		frappe.db.set_value(PROFILE_DOCTYPE, self.meera_scope.key, {"status": "Ready", "active_graph": graph})
+		self.clear_flags()  # as when both first builds have finished
+		mark_all_pending_and_rebuild()
+		self.assertEqual(set(frappe.get_all(PROFILE_DOCTYPE, pluck="status")), {"Pending"})
+		self.assertEqual(self.builds(), 4)
+		self.assertEqual(self.ask(self.meera_scope, self.meera), (None, PREPARING_MESSAGE))
+
+	def test_rebuild_requested_during_a_build_starts_it_over(self):
+		"""E.g. a permlevel change while the build runs: the graph built before it is never served."""
+		key = self.scope.key
+		self.ask(self.scope, self.rahul)
+		built = []
+
+		def build(settings, scope, graph_name):
+			built.append(graph_name)
+			if len(built) == 1:
+				mark_all_pending_and_rebuild()
+			self.make_graph(graph_name)
+			return "built"
+
+		with patch("eve_agent.access.profiles.build_profile_graph", build):
+			run_profile_build(key)
+		self.assertEqual(len(built), 2)
+		self.assertEqual(self.profile(key).status, "Ready")
+		self.assertEqual(self.builds(), 1)  # the running build started over; nothing else was queued
+
+	def test_profile_deleted_during_its_build_leaves_no_graph(self):
+		key = self.scope.key
+		self.ask(self.scope, self.rahul)
+
+		def build(settings, scope, graph_name):
+			delete_profile(key)
+			self.make_graph(graph_name)
+			return "built"
+
+		with patch("eve_agent.access.profiles.build_profile_graph", build):
+			run_profile_build(key)
+		self.assertFalse(frappe.db.exists(PROFILE_DOCTYPE, key))
+		self.assertFalse(set(profile_graph_names(self.settings, key)) & self.graphs())
+
+	def test_main_sync_queues_profile_rebuilds_on_success_only(self):
+		# The build, catch-up and Settings writes are stubbed, so the site's main graph stays as it is.
+		cases = (
+			(None, None, "Success", True),
+			(RuntimeError("FalkorDB is down"), None, "Failed", False),
+			(None, RuntimeError("queue is down"), "Success", True),  # a queueing error never fails the sync
+		)
+		for build_error, queue_error, status, queued in cases:
+			stubs = {
+				"build_data_graph": {"return_value": "built", "side_effect": build_error},
+				"load_plan": {},
+				"catch_up": {"return_value": IncrementalSummary()},
+				"publish_sync_done": {},
+			}
+			with self.subTest(build_error=build_error, queue_error=queue_error), ExitStack() as stack:
+				for name, stub in stubs.items():
+					stack.enter_context(patch(f"eve_agent.sync.data_sync.{name}", **stub))
+				rebuilds = stack.enter_context(
+					patch("eve_agent.access.profiles.enqueue_profile_rebuilds", side_effect=queue_error)
+				)
+				log_error = stack.enter_context(patch("frappe.log_error"))
+				written = stack.enter_context(patch.object(frappe.db, "set_single_value"))
+				_run_data_sync()
+				self.assertEqual(rebuilds.called, queued)
+				self.assertEqual(written.call_args.args[1]["last_data_sync_status"], status)
+				self.assertEqual(log_error.called, bool(build_error or queue_error))

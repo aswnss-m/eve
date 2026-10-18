@@ -122,7 +122,9 @@ scheduler_events = {
 	"cron": {
 		"*/5 * * * *": ["eve_agent.sync.refresh.sweep"],
 		"0 2 * * *": ["eve_agent.sync.refresh.nightly_rebuild"],
-	}
+	},
+	# Drops access profiles unused for the retention period, or that no chat user maps to any more.
+	"daily": ["eve_agent.access.profiles.cleanup_profiles"],
 }
 
 # Log Settings can prune the Cypher log.

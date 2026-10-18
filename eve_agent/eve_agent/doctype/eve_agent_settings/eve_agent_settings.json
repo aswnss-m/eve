@@ -37,6 +37,10 @@
   "column_break_data",
   "max_records_per_doctype",
   "incremental_sync",
+  "access_profiles_section",
+  "max_access_profiles",
+  "column_break_access_profiles",
+  "access_profile_retention_days",
   "status_section",
   "last_synced_at",
   "last_sync_status",
@@ -246,6 +250,32 @@
    "label": "Incremental Sync"
   },
   {
+   "description": "Users who can read different things get separate graphs, one per <a href=\"/app/eve-access-profile\">Eve Access Profile</a>. Users with full access read the main data graph.",
+   "fieldname": "access_profiles_section",
+   "fieldtype": "Section Break",
+   "label": "Access Profiles"
+  },
+  {
+   "default": "20",
+   "description": "At the limit, a new profile replaces the least recently used one that has been idle for over 24 hours. When none has, users who need a new profile are told Eve is at capacity.",
+   "fieldname": "max_access_profiles",
+   "fieldtype": "Int",
+   "label": "Max Access Profiles",
+   "non_negative": 1
+  },
+  {
+   "fieldname": "column_break_access_profiles",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "14",
+   "description": "A profile nobody has asked through for this long is deleted with its graphs. It is built again when needed.",
+   "fieldname": "access_profile_retention_days",
+   "fieldtype": "Int",
+   "label": "Drop Unused Access Profiles After (Days)",
+   "non_negative": 1
+  },
+  {
    "collapsible": 1,
    "fieldname": "status_section",
    "fieldtype": "Section Break",
@@ -317,7 +347,7 @@
  ],
  "issingle": 1,
  "links": [],
- "modified": "2026-10-16 12:00:00.000000",
+ "modified": "2026-10-18 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "Eve Agent",
  "name": "Eve Agent Settings",
