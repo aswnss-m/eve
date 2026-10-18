@@ -87,13 +87,24 @@ MEMORY_CONTEXT = """
 MATCH (u:User {name: $user})
 OPTIONAL MATCH (u)-[a:ASKED_ABOUT]->(e:EntityRef)
 WITH u, e, a ORDER BY a.count DESC, a.last_at DESC
-WITH u, collect(e.doctype + ' ' + e.name + ' (asked ' + toString(a.count) + 'x)')[0..8] AS interests
+WITH u, collect({doctype: e.doctype, name: e.name, count: a.count})[0..40] AS interests
 OPTIONAL MATCH (u)-[:HAD]->(c:Conversation)
 WITH u, interests, c ORDER BY c.updated_at DESC
 WITH u, interests, collect(c.title + ' [' + substring(c.updated_at, 0, 10) + ']')[0..5] AS recent
 OPTIONAL MATCH (u)-[:SAVED]->(i:Insight)
 WITH interests, recent, i ORDER BY i.at DESC
 RETURN interests, recent, collect(i.text + ' [' + substring(i.at, 0, 10) + ']')[0..5] AS insights"""
+
+
+def readable_refs(ctx: ToolContext, refs) -> list[dict]:
+	"""Entity maps ({doctype, name, ...}) the user may read; empty slots from OPTIONAL MATCH are dropped."""
+	out = []
+	for ref in refs or []:
+		if not ref or not ref.get("name"):
+			continue
+		if ctx.can_read is None or ctx.can_read(ref.get("doctype") or "", str(ref["name"])):
+			out.append(ref)
+	return out
 
 
 def memory_context(ctx: ToolContext) -> str:
@@ -110,8 +121,12 @@ def memory_context(ctx: ToolContext) -> str:
 		return [str(v) for v in (value or []) if v]
 
 	parts = []
-	if items(row.get("interests")):
-		parts.append("Records they ask about most: " + "; ".join(items(row.get("interests"))))
+	interests = [
+		f"{r['doctype']} {r['name']} (asked {r.get('count')}x)"
+		for r in readable_refs(ctx, row.get("interests"))
+	][:8]
+	if interests:
+		parts.append("Records they ask about most: " + "; ".join(interests))
 	if items(row.get("recent")):
 		parts.append("Recent conversations: " + "; ".join(items(row.get("recent"))))
 	if items(row.get("insights")):
@@ -124,14 +139,14 @@ MATCH (u:User {name: $user})-[:HAD]->(c:Conversation)-[:HAS_MESSAGE]->(m:Message
 WHERE $topic = '' OR toLower(m.text) CONTAINS $topic
 OPTIONAL MATCH (m)-[:MENTIONS]->(e:EntityRef)
 RETURN c.title AS conversation, m.role AS role, m.at AS at, substring(m.text, 0, 400) AS text,
-       collect(e.doctype + ' ' + e.name)[0..5] AS mentions
+       collect({doctype: e.doctype, name: e.name})[0..20] AS mentions
 ORDER BY at DESC LIMIT 12"""
 
 RECALL_INSIGHTS = """
 MATCH (u:User {name: $user})-[:SAVED]->(i:Insight)
 WHERE $topic = '' OR toLower(i.text) CONTAINS $topic
 OPTIONAL MATCH (i)-[:DERIVED_FROM]->(e:EntityRef)
-RETURN i.text AS insight, i.at AS at, collect(e.doctype + ' ' + e.name) AS sources
+RETURN i.text AS insight, i.at AS at, collect({doctype: e.doctype, name: e.name}) AS sources
 ORDER BY at DESC LIMIT 10"""
 
 SAVE_INSIGHT = """
@@ -165,6 +180,12 @@ def memory_tools(ctx: ToolContext) -> list[Tool]:
 			ctx.memory.ro("Past messages", RECALL, params),
 			ctx.memory.ro("Saved insights", RECALL_INSIGHTS, params),
 		]
+		for run in runs:
+			for row in run.rows:
+				for key, limit in (("mentions", 5), ("sources", None)):
+					if key in row:
+						refs = readable_refs(ctx, row[key])
+						row[key] = [f"{r['doctype']} {r['name']}" for r in refs][:limit]
 		return result(ctx, runs, [])
 
 	def remember_insight(args: RememberInsightArgs) -> dict:

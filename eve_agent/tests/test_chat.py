@@ -8,18 +8,20 @@ The live class runs against FalkorDB when it is reachable (EVE_TEST_REDIS,
 default redis://127.0.0.1:6500; EVE_TEST_GRAPH, default eve_local_data) and skips otherwise.
 """
 
+import json
 import os
 import re
 import unittest
 from types import SimpleNamespace
 
-from eve_agent.chat.common import ChatConfig, ChatUser, QueryRun, Tool, ToolContext
+from eve_agent.access.scope import AccessScope
+from eve_agent.chat.common import ChatConfig, ChatUser, QueryRun, Tool, ToolContext, result
 from eve_agent.chat.graph import Graph, plain
 from eve_agent.chat.llm import model_arguments
 from eve_agent.chat.loop import run_turn, to_model_messages
 from eve_agent.chat.memory import entity_refs, memory_context, save_turn
 from eve_agent.chat.prompt import system_prompt
-from eve_agent.chat.tools import build_tools
+from eve_agent.chat.tools import TOOL_NEEDS, build_tools
 from eve_agent.chat.tools.entities import fulltext_query
 from eve_agent.chat.tools.sales import TopCustomersArgs
 from eve_agent.falkor.query.readonly import WriteQueryError, assert_read_only
@@ -419,6 +421,121 @@ class ActionToolTests(unittest.TestCase):
 		self.assertEqual(form["tables"][0]["child_doctype"], "Sales Invoice Item")
 		self.assertEqual([f["fieldname"] for f in form["tables"][0]["required"]], ["item_code", "qty"])
 		self.assertFalse(form["writable"])
+
+
+def make_scope(readable, own=()):
+	parents = tuple(sorted(d for d in readable if d not in ("Sales Invoice Item",)))
+	return AccessScope(
+		key="k",
+		full_access=False,
+		readable=readable,
+		user_permissions={},
+		own_record_doctypes=tuple(own),
+		parents=parents,
+	)
+
+
+class ScopeTests(unittest.TestCase):
+	def scoped(self, readable, **kw):
+		ctx = make_ctx()
+		ctx.scope = make_scope(readable)
+		for k, v in kw.items():
+			setattr(ctx, k, v)
+		return ctx
+
+	def test_tools_hidden_without_visible_doctypes(self):
+		ctx = self.scoped({"Customer": (0,), "Sales Order": (0,), "Item": (0,)})
+		names = {t.name for t in build_tools(ctx)}
+		self.assertNotIn("top_suppliers", names)
+		self.assertNotIn("supplier_risk", names)
+		self.assertIn("top_customers", names)
+
+	def test_empty_scope_hides_data_tools(self):
+		names = {t.name for t in build_tools(self.scoped({}))}
+		self.assertFalse(names & set(TOOL_NEEDS))
+		self.assertTrue({"find_entity", "run_cypher", "recall"} <= names)
+
+	def test_result_drops_unreadable_sources_and_rows(self):
+		hidden = []
+		ctx = self.scoped(
+			{"Customer": (0,)},
+			can_read=lambda dt, name: (dt, name) != ("Sales Invoice", "SI-1"),
+			on_hidden_source=hidden.append,
+		)
+		run = QueryRun("t", "RETURN 1", {}, [{"name": "SI-1"}, {"name": "SI-2"}], 0)
+		sources = [{"doctype": "Sales Invoice", "name": "SI-1"}, {"doctype": "Sales Invoice", "name": "SI-2"}]
+		out = result(ctx, [run], sources)
+		self.assertEqual(out["sources"], [{"doctype": "Sales Invoice", "name": "SI-2"}])
+		self.assertEqual(out["queries"][0]["rows"], [{"name": "SI-2"}])
+		self.assertEqual(ctx.cited, out["sources"])
+		self.assertEqual(hidden, [{"doctype": "Sales Invoice", "name": "SI-1", "tool": ""}])
+
+	def test_prompt_lists_visible_doctypes(self):
+		ctx = self.scoped({"Customer": (0,), "Sales Order": (0,), "Item": (0,), "Employee": (0,)})
+		ctx.scope.own_record_doctypes = ("Employee",)
+		prompt = system_prompt(ctx.config, ctx.user, "", ctx.scope)
+		self.assertIn("Visible DocTypes: Customer, Item, Sales Order.", prompt)
+		self.assertIn("Never say the data doesn't exist and never guess it.", prompt)
+		self.assertNotIn("Visible DocTypes", system_prompt(ctx.config, ctx.user, ""))
+
+	def test_describe_refuses_and_filters_levels(self):
+		fields = [
+			{"fieldname": "customer_name", "fieldtype": "Data"},
+			{"fieldname": "credit_limit", "fieldtype": "Currency", "permlevel": 1},
+		]
+
+		class Schema(FakeGraph):
+			def ro(self, title, cypher, params=None):
+				run = super().ro(title, cypher, params)
+				run.rows = [
+					{"doctype": "Customer", "fields": json.dumps(fields), "links": [
+						{"type": "LINKS_TO", "field": "credit_limit", "target": "X"},
+					]}
+				]
+				return run
+
+		ctx = self.scoped({"Customer": (0,)})
+		ctx.schema = Schema("schema")
+		tools = {t.name: t for t in build_tools(ctx)}
+		describe = tools["describe_doctype"]
+		with self.assertRaisesRegex(ValueError, "You don't have access to Sales Invoice."):
+			describe.run(describe.params.model_validate({"doctype": "Sales Invoice"}))
+		row = describe.run(describe.params.model_validate({"doctype": "Customer"}))["queries"][0]["rows"][0]
+		self.assertEqual(row["fields"], ["customer_name:Data"])
+		self.assertEqual(row["links"], [])
+		form_tool = tools["record_form"]
+		form = form_tool.run(form_tool.params.model_validate({"doctype": "Customer"}))["form"]
+		self.assertEqual([f["fieldname"] for f in form["optional"]], ["customer_name"])
+		with self.assertRaises(ValueError):
+			form_tool.run(form_tool.params.model_validate({"doctype": "Sales Invoice"}))
+		ctx.scope.readable["Customer"] = (0, 1)
+		row = describe.run(describe.params.model_validate({"doctype": "Customer"}))["queries"][0]["rows"][0]
+		self.assertEqual(len(row["fields"]), 2)
+
+	def test_memory_hides_unreadable_mentions(self):
+		class Memory(FakeGraph):
+			def ro(self, title, cypher, params=None):
+				run = super().ro(title, cypher, params)
+				if title == "Past messages":
+					run.rows = [{"text": "hi", "mentions": [
+						{"doctype": "Sales Invoice", "name": "SI-1"}, {"doctype": "Customer", "name": "Acme"},
+					]}]
+				elif title == "Memory context":
+					run.rows = [{"interests": [
+						{"doctype": "Sales Invoice", "name": "SI-1", "count": 2},
+						{"doctype": "Customer", "name": "Acme", "count": 1},
+						{"doctype": None, "name": None, "count": None},
+					], "recent": [], "insights": []}]
+				return run
+
+		ctx = self.scoped({"Customer": (0,)}, can_read=lambda dt, name: dt == "Customer")
+		ctx.memory = Memory("memory")
+		recall = next(t for t in build_tools(ctx) if t.name == "recall")
+		out = recall.run(recall.params.model_validate({}))
+		self.assertEqual(out["queries"][0]["rows"][0]["mentions"], ["Customer Acme"])
+		summary = memory_context(ctx)
+		self.assertIn("Customer Acme (asked 1x)", summary)
+		self.assertNotIn("SI-1", summary)
 
 
 class PlainTests(unittest.TestCase):

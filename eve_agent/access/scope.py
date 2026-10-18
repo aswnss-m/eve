@@ -24,7 +24,11 @@ class AccessScope:
 	parents: tuple[str, ...] = ()  # sorted readable parent DocTypes (derived, not part of the key)
 
 	def can_see(self, doctype: str) -> bool:
-		return self.full_access or doctype in self.readable or doctype in SPECIAL_KEEP
+		if self.full_access:
+			return True
+		if doctype in self.own_record_doctypes:
+			return False  # Graph copies leave own-record DocTypes out (see filter_plan).
+		return doctype in self.readable or doctype in SPECIAL_KEEP
 
 	def to_json(self) -> str:
 		return json.dumps(

@@ -126,3 +126,12 @@ class AccessTests(unittest.TestCase):
 		self.assertEqual(s.parents, ("Customer", "Sales Order"))
 		self.assertEqual(AccessScope.from_json(s.to_json()), s)
 		self.assertEqual(AccessScope.from_json(s.to_json()).parents, ("Customer", "Sales Order"))
+
+
+	def test_can_see_excludes_own_record_doctypes(self):
+		s = make_scope({"Customer": (0,), "Employee": (0,)}, own=("Employee",))
+		self.assertTrue(s.can_see("Customer"))
+		self.assertTrue(s.can_see("User"))
+		self.assertFalse(s.can_see("Employee"))
+		self.assertFalse(s.can_see("Item"))
+		self.assertTrue(FULL_SCOPE.can_see("Employee"))

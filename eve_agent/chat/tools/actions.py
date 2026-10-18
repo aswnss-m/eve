@@ -11,7 +11,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-from eve_agent.chat.common import Tool, ToolContext, result
+from eve_agent.chat.common import Tool, ToolContext, filter_fields_json, result, visible
 from eve_agent.chat.tools.utility import DESCRIBE_DOCTYPE
 
 LAYOUT_TYPES = {"Section Break", "Column Break", "Tab Break", "Fold", "Button", "HTML", "Heading", "Image"}
@@ -62,10 +62,14 @@ def _split_fields(fields_json: str | None) -> tuple[list[dict], list[dict], list
 
 def action_tools(ctx: ToolContext) -> list[Tool]:
 	def describe(doctype: str) -> dict:
+		if not visible(ctx, doctype):
+			raise ValueError(f"You don't have access to {doctype}.")
 		run = ctx.schema.ro(f"Schema of {doctype}", DESCRIBE_DOCTYPE, {"doctype": doctype})
 		if not run.rows:
 			raise ValueError(f"Unknown DocType '{doctype}'.")
-		return run.rows[0]
+		row = run.rows[0]
+		row["fields"] = filter_fields_json(ctx, doctype, row.get("fields"))
+		return row
 
 	def record_form(args: RecordFormArgs) -> dict:
 		row = describe(args.doctype)

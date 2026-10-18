@@ -4,6 +4,7 @@ The tools are a Python port of the agent's TypeScript tools. Their Cypher and
 result shape match, so the Desk widget renders them the same way.
 """
 
+import json
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -12,6 +13,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from eve_agent.access.scope import SPECIAL_KEEP, AccessScope
 from eve_agent.falkor.cypher.data_queries import quote_label
 
 MAX_SOURCES = 25
@@ -80,6 +82,13 @@ class ToolContext:
 	# can_write(doctype, "create" | "write") -> bool, and log_cypher(entry) for run_cypher.
 	can_write: Callable[[str, str], bool] | None = None
 	log_cypher: Callable[[dict], None] | None = None
+	# Permissions, injected the same way. scope None means full access; can_read(doctype, name) -> bool
+	# is the live per-record check; on_hidden_source(info) is told when result() drops a source.
+	scope: AccessScope | None = None
+	can_read: Callable[[str, str], bool] | None = None
+	on_hidden_source: Callable[[dict], None] | None = None
+	# The tool being run, set by build_tools, so a hidden source can say where it came from.
+	current_tool: str = ""
 
 
 @dataclass
@@ -113,7 +122,63 @@ def refs(rows: list[dict], doctype: str, name_key: str, title_key: str | None = 
 	return out
 
 
+def visible(ctx: ToolContext, doctype: str) -> bool:
+	return ctx.scope is None or ctx.scope.can_see(doctype)
+
+
+def readable_levels(ctx: ToolContext, doctype: str) -> set[int] | None:
+	"""The permlevels the user may read on a DocType; None means all (full access)."""
+	scope = ctx.scope
+	if scope is None or scope.full_access:
+		return None
+	if doctype in scope.readable:
+		return set(scope.readable[doctype])
+	return {0} if doctype in SPECIAL_KEEP else set()
+
+
+def filter_fields_json(ctx: ToolContext, doctype: str, fields_json: str | None) -> str:
+	"""A schema node's fields_json without the fields whose permlevel the user may not read.
+	A field with no permlevel counts as level 0."""
+	levels = readable_levels(ctx, doctype)
+	if levels is None:
+		return fields_json or "[]"
+	fields = json.loads(fields_json or "[]")
+	return json.dumps([f for f in fields if (f.get("permlevel") or 0) in levels])
+
+
+def _mentions(row: dict, name: str) -> bool:
+	for value in row.values():
+		if value == name or (isinstance(value, list) and name in value):
+			return True
+	return False
+
+
+def _drop_hidden(ctx: ToolContext, queries: list[QueryRun], sources: list[dict]) -> list[dict]:
+	"""Safety net: remove sources the user can't read, and the rows that name them."""
+	allowed: list[dict] = []
+	checked: dict[str, bool] = {}
+	hidden_names: set[str] = set()
+	for source in sources:
+		key = f"{source['doctype']}|{source['name']}"
+		if key not in checked:
+			checked[key] = bool(ctx.can_read(source["doctype"], source["name"]))
+			if not checked[key]:
+				hidden_names.add(str(source["name"]))
+				if ctx.on_hidden_source:
+					ctx.on_hidden_source(
+						{"doctype": source["doctype"], "name": source["name"], "tool": ctx.current_tool}
+					)
+		if checked[key]:
+			allowed.append(source)
+	if hidden_names:
+		for q in queries:
+			q.rows = [r for r in q.rows if not any(_mentions(r, n) for n in hidden_names)]
+	return allowed
+
+
 def result(ctx: ToolContext, queries: list[QueryRun], sources: list[dict], note: str | None = None) -> dict:
+	if ctx.can_read is not None:
+		sources = _drop_hidden(ctx, queries, sources)
 	seen: set[str] = set()
 	unique = []
 	for source in sources:
