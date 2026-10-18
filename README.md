@@ -248,6 +248,81 @@ Profiles that no user with a Chat Role maps to any more are deleted. The existin
 
 Save-speed check: <to be filled by controller>
 
+### Running on a Docker stack (frappe_docker)
+
+In a [frappe_docker](https://github.com/frappe/frappe_docker) deployment the apps are part of the image and only `sites/` is a volume. A `bench get-app` inside a running container is lost when the container is recreated, and `sites/apps.txt` then names an app that isn't there. Build Eve into the image instead: add it to `apps.json` and rebuild, or layer it on the image you already run:
+
+```dockerfile
+FROM <your-current-image>
+USER frappe
+WORKDIR /home/frappe/frappe-bench
+# git clone --branch develop https://github.com/aswnss-m/eve apps/eve_agent  (next to this file)
+COPY --chown=frappe:frappe apps/eve_agent /home/frappe/frappe-bench/apps/eve_agent
+RUN env/bin/pip install --no-cache-dir -e apps/eve_agent \
+ && env/bin/pip check
+# public/dist is committed, so no Node build: put the app's public folder into the image's assets directory.
+RUN ls -1 apps > sites/apps.txt \
+ && ln -sfn /home/frappe/frappe-bench/apps/eve_agent/eve_agent/public /home/frappe/frappe-bench/sites/assets/eve_agent
+```
+
+The link assumes `sites/assets` resolves inside the image (for example a symlink to `../assets`), not into the sites volume. If it doesn't, run `npm install && bench build --app eve_agent` in the build instead; the widget's Vite build needs Node 20.19 or later.
+
+Keep `pip check` in the build: it fails on dependency conflicts instead of shipping them. Then recreate every Frappe container (backend, websocket, scheduler, workers, frontends) on the new image and install:
+
+```bash
+docker exec <backend> bash -c 'ls -1 apps > sites/apps.txt'
+docker exec <backend> bench --site <site> clear-cache
+docker exec <backend> bench --site <site> install-app eve_agent
+docker exec <backend> bench --site <site> migrate
+```
+
+`clear-cache` must come first. The stack's Redis cache outlives the containers and still holds the app module map from the old image, so without it `install-app` reports success but creates none of Eve's DocTypes.
+
+**FalkorDB as a service on the stack.** Add it to the stack's network and don't publish its Redis port:
+
+```yaml
+services:
+  falkordb:
+    image: falkordb/falkordb:v4.22.1
+    networks: [frappe_network]
+    restart: unless-stopped
+    environment:
+      FALKORDB_ARGS: "MAX_QUEUED_QUERIES 100 TIMEOUT 10000 RESULTSET_SIZE 10000 CACHE_SIZE 128"
+      REDIS_ARGS: "--appendonly yes --appendfsync everysec"
+    volumes:
+      - falkordb-data:/var/lib/falkordb/data
+    ports:
+      - "127.0.0.1:4000:3000"   # FalkorDB Browser, for an SSH tunnel
+volumes:
+  falkordb-data:
+```
+
+Eve Agent Settings → FalkorDB Redis URL: `redis://falkordb:6379`.
+
+**Publishing the FalkorDB Browser.** The server has no password, and anyone who reaches the browser can read, change and delete every graph. If people must open it without an SSH tunnel, put a login in front of it. A small nginx with Basic auth works. Proxy to `falkordb:3000` and drop the gate's `Authorization` header upstream, because the browser keeps its own session:
+
+```nginx
+server {
+    listen 80;
+    auth_basic           "FalkorDB Browser";
+    auth_basic_user_file /etc/nginx/falkordb-gate/htpasswd;   # user:hash lines, e.g. openssl passwd -6
+    resolver 127.0.0.11 valid=30s;
+    set $browser http://falkordb:3000;
+    location / {
+        proxy_pass $browser;
+        proxy_http_version 1.1;
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Forwarded-Host $http_host;
+        proxy_set_header Authorization "";
+        proxy_buffering off;
+    }
+}
+```
+
+On plain http the login crosses the network unencrypted. Prefer https, or restrict the port to known IP addresses.
+
+**LiteLLM and other apps' openai pins.** Every litellm from 1.84 requires `openai<3` and `boto3>=1.43`. If another app on the bench needs `openai>=3` (for example through `openai-agents`), or Frappe pins an older `boto3` (15.112 pins `~=1.34`), `pip check` fails. litellm 1.83.0 is the newest release that fits both. It works with openai 3.x for the Anthropic, OpenAI and Gemini providers, but it is below Eve's `litellm>=1.97` floor, which then has to be lowered for that bench.
+
 ### Troubleshooting
 
 
@@ -267,6 +342,8 @@ Save-speed check: <to be filled by controller>
 | Answers mention old data                                  | No `short` worker is running (incremental sync), the scheduler is disabled, or **Incremental Sync** is off. Use **Sync Pending Changes Now** or **Sync Data Graph Now**            |
 | A new record is in the graph but a total (e.g. BOUGHT) is off | Cross-document totals are recomputed for the records a change touches; anything missed is corrected by the nightly rebuild, or run **Sync Data Graph Now**                 |
 | No microphone button in the chat                          | The browser has no SpeechRecognition (Firefox), or the Desk is served over plain http from a host other than localhost                                                       |
+| After `install-app`, "DocType Eve Agent Settings not found" or "No module named 'frappe.core.doctype.eve_agent_settings'" | The Redis cache held the module map from before the app was added, so no DocTypes were synced. Run `bench --site <site> clear-cache`, then `bench --site <site> migrate` |
+| `pip check` fails: `openai-agents ... requires openai<4,>=3` or `frappe ... requires boto3~=1.34` | litellm 1.84 and later need `openai<3` and `boto3>=1.43`. See "LiteLLM and other apps' openai pins" under Running on a Docker stack |
 
 
 
