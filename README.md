@@ -2,6 +2,31 @@
 
 A company-brain chat agent for ERPNext, backed by FalkorDB.
 
+### Contents
+
+- [Overview](#overview)
+- [How it works](#how-it-works)
+- [Requirements](#requirements)
+- [1. Run FalkorDB](#1-run-falkordb)
+- [2. Install the app](#2-install-the-app)
+- [3. Configure](#3-configure)
+- [4. Sync](#4-sync)
+- [5. Explore](#5-explore)
+- [6. Chat with Eve](#6-chat-with-eve)
+- [Permissions](#permissions)
+- [Running on a Docker stack (frappe_docker)](#running-on-a-docker-stack-frappe_docker)
+- [Troubleshooting](#troubleshooting)
+- [Environments: links and logins](#environments-links-and-logins)
+  - [Environments at a glance](#environments-at-a-glance)
+  - [Logins](#logins)
+  - [Production demo in detail](#production-demo-in-detail)
+  - [Local test in detail](#local-test-in-detail)
+- [Development](#development)
+- [Contributing](#contributing)
+- [Graph Hacks submission](#graph-hacks-submission)
+
+### Overview
+
 Eve copies a Frappe site's DocType schema and its ERP records into [FalkorDB](https://www.falkordb.com/) (a graph database on Redis). It then adds ERPNext / HRMS business relationships (customer → order → delivery → invoice → payment, customer → item, supplier → item, employee → department, GL postings) and a people layer (who created, sells, commented on or was assigned what).
 
 Installing the app also adds **Ask Eve**, a chat panel on every Desk page. Eve answers questions such as "which items sell best?", "who are our best customers?", "who knows Apex Industries best?" or "how did this order come about?" by querying the graph. Every answer shows the Cypher it ran and links to the ERP records behind it, and Eve remembers each user's past conversations in a memory graph.
