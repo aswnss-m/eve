@@ -9,7 +9,6 @@ while a build runs bumps the record's `modified`, and the running build then sta
 """
 
 import time
-from collections import Counter
 from functools import partial
 
 import frappe
@@ -17,10 +16,9 @@ from frappe.utils import add_days, add_to_date, cint, now_datetime
 from frappe.utils.synchronization import filelock
 
 from eve_agent.access.build import build_profile_graph, profile_graph_names
+from eve_agent.access.members import cached_member_counts, member_counts
 from eve_agent.access.reader import ProfileReader
-from eve_agent.access.resolve import resolve_scope
 from eve_agent.access.scope import AccessScope, filter_plan
-from eve_agent.api.agent import chat_allowed
 from eve_agent.falkor.importer.data_rows import parse_lines
 from eve_agent.sync.data_sync import CATCH_UP_OVERLAP_SECONDS, catch_up, load_plan
 from eve_agent.sync.schema_sync import SETTINGS_DOCTYPE, get_graph_client
@@ -111,11 +109,11 @@ def _create(scope: AccessScope) -> bool:
 
 def _evictable(settings) -> list[str]:
 	"""Profiles no chat user maps to (however recent), then those idle for a day, least recent first."""
-	members = member_counts(settings)
+	members = cached_member_counts(settings)  # None: unknown, so only the idle rule applies
 	idle_since = add_to_date(now_datetime(), hours=-EVICT_IDLE_HOURS)
 	rows = frappe.get_all(PROFILE_DOCTYPE, fields=["name", "last_used_at"], order_by="last_used_at asc")
-	unmapped = [r.name for r in rows if r.name not in members]
-	idle = [r.name for r in rows if r.name in members and (r.last_used_at or idle_since) <= idle_since]
+	unmapped = [] if members is None else [r.name for r in rows if r.name not in members]
+	idle = [r.name for r in rows if r.name not in unmapped and (r.last_used_at or idle_since) <= idle_since]
 	return unmapped + idle
 
 
@@ -306,16 +304,13 @@ def drop_graphs(key: str, active_graph: str | None = None) -> None:
 		get_graph_client(settings, name).delete_graph()
 
 
-def member_counts(settings) -> Counter:
-	"""Profile key -> how many enabled users with a Chat Role map to it."""
-	plan = load_plan(settings)
-	users = frappe.get_all("User", {"enabled": 1}, pluck="name")
-	return Counter(resolve_scope(user, plan).key for user in users if chat_allowed(settings, user))
-
-
 def sweep_unmapped(settings) -> None:
-	"""Delete the profiles no enabled chat user maps to any more; record the others' member counts."""
-	members = member_counts(settings)
+	"""Delete the profiles no chat user maps to any more; record the others' member counts.
+
+	Not while Enable Chat is off: nobody can ask then, and the profiles are wanted again after."""
+	if not settings.enable_chat:
+		return
+	members = member_counts(settings)  # computed now, which also refreshes the cache
 	for key in frappe.get_all(PROFILE_DOCTYPE, pluck="name"):
 		if key in members:
 			frappe.db.set_value(PROFILE_DOCTYPE, key, "member_count", members[key], update_modified=False)

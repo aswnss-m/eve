@@ -8,7 +8,7 @@ import re
 import unittest
 from contextlib import ExitStack
 from dataclasses import replace
-from unittest.mock import patch
+from unittest.mock import Mock, call, patch
 
 import frappe
 import frappe.share
@@ -17,7 +17,9 @@ from frappe.tests.utils import FrappeTestCase
 from frappe.utils import add_days, now_datetime, today
 from frappe.utils.nestedset import get_root_of
 
+from eve_agent.access import members
 from eve_agent.access.build import build_profile_graph, profile_graph_names
+from eve_agent.access.members import member_counts
 from eve_agent.access.profiles import (
 	CAPACITY_LOG_FLAG,
 	CAPACITY_MESSAGE,
@@ -32,6 +34,7 @@ from eve_agent.access.profiles import (
 	ensure_ready,
 	mark_all_pending_and_rebuild,
 	run_profile_build,
+	sweep_unmapped,
 )
 from eve_agent.access.reader import ProfileReader
 from eve_agent.access.resolve import hook_restricted, is_own_record, resolve_scope
@@ -525,6 +528,7 @@ class ProfileLifecycleTests(FrappeTestCase):
 		for key in self.all_keys:
 			frappe.cache.delete(build_flag(key))
 		frappe.cache.delete(frappe.cache.make_key(CAPACITY_LOG_FLAG))
+		frappe.cache.delete_value([members.CACHE_KEY, members.UNAVAILABLE_KEY])
 
 	def ask(self, scope, user):
 		self.keys.add(scope.key)
@@ -660,10 +664,27 @@ class ProfileLifecycleTests(FrappeTestCase):
 		for key, days in ((self.scope.key, 3), (self.priya_scope.key, 2)):
 			frappe.db.set_value(PROFILE_DOCTYPE, key, "last_used_at", add_days(now_datetime(), -days))
 		mapped = {self.scope.key: 1, self.priya_scope.key: 1}  # rahul has no Chat Role: count him in
-		with patch("eve_agent.access.profiles.member_counts", return_value=mapped):
+		frappe.cache.set_value(members.CACHE_KEY, mapped, expires_in_sec=60)
+		with patch("eve_agent.access.members.resolve_scope") as resolve:
 			self.assertEqual(self.ask(self.meera_scope, self.meera), (None, PREPARING_MESSAGE))
+		resolve.assert_not_called()  # the cached counts were used
 		self.assertFalse(frappe.db.exists(PROFILE_DOCTYPE, self.scope.key))
 		self.assertTrue(frappe.db.exists(PROFILE_DOCTYPE, self.priya_scope.key))
+
+	def test_capacity_falls_back_to_idle_rule_when_members_are_unknown(self):
+		self.require_no_other_profiles()
+		self.set_setting("max_access_profiles", 1)
+		self.ask(replace(self.scope, key=self.UNMAPPED_KEY), self.rahul)  # used just now
+		broken = patch("eve_agent.access.members.resolve_scope", side_effect=RuntimeError("bad user"))
+		with broken as resolve, patch("frappe.log_error") as log_error:
+			self.assertEqual(self.ask(self.meera_scope, self.meera), (None, CAPACITY_MESSAGE))
+			self.assertEqual((resolve.call_count, log_error.call_count), (1, 2))  # members, then capacity
+			# Once idle for a day it is evicted; the failed count is not retried for a few minutes.
+			idle = add_days(now_datetime(), -2)
+			frappe.db.set_value(PROFILE_DOCTYPE, self.UNMAPPED_KEY, "last_used_at", idle)
+			self.assertEqual(self.ask(self.meera_scope, self.meera), (None, PREPARING_MESSAGE))
+			self.assertEqual(resolve.call_count, 1)
+		self.assertFalse(frappe.db.exists(PROFILE_DOCTYPE, self.UNMAPPED_KEY))
 
 	def test_capacity_evicts_unmapped_profile_used_just_now(self):
 		self.require_no_other_profiles()
@@ -704,6 +725,14 @@ class ProfileLifecycleTests(FrappeTestCase):
 		profile = self.profile(self.priya_scope.key)
 		self.assertEqual(profile.status, "Ready")
 		self.assertGreaterEqual(profile.member_count, 1)
+
+	def test_no_sweep_while_chat_is_off(self):
+		self.ask(replace(self.scope, key=self.UNMAPPED_KEY), self.rahul)
+		settings = frappe.get_single("Eve Agent Settings")
+		settings.enable_chat = 0  # not saved: the running site keeps its chat
+		sweep_unmapped(settings)
+		self.assertTrue(frappe.db.exists(PROFILE_DOCTYPE, self.UNMAPPED_KEY))
+		self.assertIn(self.priya_scope.key, member_counts(settings))  # counted by Chat Role regardless
 
 	def test_mark_all_pending(self):
 		self.ask(self.scope, self.rahul)
@@ -788,7 +817,12 @@ class ProfileLifecycleTests(FrappeTestCase):
 				)
 				log_error = stack.enter_context(patch("frappe.log_error"))
 				written = stack.enter_context(patch.object(frappe.db, "set_single_value"))
+				order = Mock()
+				order.attach_mock(rebuilds, "rebuilds")
+				order.attach_mock(stack.enter_context(patch.object(frappe.db, "commit")), "commit")
 				_run_data_sync()
 				self.assertEqual(rebuilds.called, queued)
 				self.assertEqual(written.call_args.args[1]["last_data_sync_status"], status)
 				self.assertEqual(log_error.called, bool(build_error or queue_error))
+				if queued and not queue_error:  # builds are sent on commit; `bench sync-data` won't commit
+					self.assertEqual(order.mock_calls[-2:], [call.rebuilds(), call.commit()])

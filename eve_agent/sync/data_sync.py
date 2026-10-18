@@ -150,6 +150,7 @@ def _run_data_sync() -> str:
 		# Profile graphs follow the main one. Queueing them never turns this sync into a failure.
 		try:
 			enqueue_profile_rebuilds()
+			frappe.db.commit()  # Sends the builds (queued on commit); `bench sync-data` won't commit later.
 		except Exception:
 			frappe.log_error(title="Eve Agent: could not queue access profile rebuilds")
 	return text
