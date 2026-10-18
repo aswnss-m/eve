@@ -664,6 +664,5 @@ Pre-commit is configured to use the following tools for checking and formatting 
 
 - **Track:** Company Brain (Track 03). The graph also does the work for Agents That Act on Connected Data (multi-hop tools, explainable results) and Agent Memory (the per-user memory graph).
 - **Data:** synthetic. The demo site is filled by a seeding app plus `eve_agent.demo.seed_people`; no real customer or personal data.
-- **Graph model:** [docs/graph-guide.md](docs/graph-guide.md). **Queries the product depends on:** `eve_agent/chat/tools/` and `eve_agent/falkor/cypher/`.
-- **AI assistance:** AI coding assistants (Claude Code) were used to build parts of this project.
+- **Graph model:** [docs/graph-guide.md](docs/graph-guide.md). **Queries the product depends on:** `eve_agent/chat/tools/` and `eve_agent/falkor/cypher/`.        
 
