@@ -1434,6 +1434,16 @@ class ChatRequestTests(FrappeTestCase):
 		user = {"user": self.priya}
 		self.assertEqual(self.hidden_logs(), [{**forged, "tool": "top_customers", **user}])
 
+	def test_deleted_record_is_dropped_without_a_log(self):
+		"""Deleted in Frappe, not drained out of the graph yet: not readable, but not a profile graph bug."""
+		self.build(self.priya, "CREATE (:EveTest)")
+		ctx = self.context(self.priya)
+		gone = {"doctype": "Sales Order", "name": "eve-test-deleted-order"}
+		run = QueryRun(title="Orders", cypher="", params={}, rows=[{"name": gone["name"]}], ms=0)
+		out = result(ctx, [run], [gone])
+		self.assertEqual((out["sources"], out["queries"][0]["rows"]), ([], []))
+		self.assertEqual(self.hidden_logs(), [])
+
 	def test_can_read_checks_rows_and_comments_through_their_document(self):
 		can_read = make_can_read(self.priya)
 		order_item = frappe.db.get_value("Sales Order Item", {"parent": self.order})

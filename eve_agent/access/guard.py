@@ -59,10 +59,15 @@ def _readable(doctype: str, name: str, user: str) -> bool:
 
 def log_hidden_source(user: str) -> Callable[[dict], None]:
 	"""on_hidden_source(source): an Error Log for admins. Committed at once: a streamed answer's request
-	committed before streaming began. Logging never fails a turn."""
+	committed before streaming began. Logging never fails a turn.
+
+	A record that no longer exists (deleted, not drained out of the graph yet) is dropped without a log:
+	that is drain lag, not a profile graph bug."""
 
 	def log(source: dict) -> None:
 		try:
+			if not frappe.db.exists(source["doctype"], source["name"]):
+				return
 			details = json.dumps({**source, "user": user}, default=str)
 			frappe.log_error(title=HIDDEN_SOURCE_TITLE, message=details)
 			frappe.db.commit()
