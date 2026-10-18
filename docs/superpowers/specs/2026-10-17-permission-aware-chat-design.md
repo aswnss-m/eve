@@ -1,6 +1,6 @@
 # Permission-aware Eve: answer only from what the user can read
 
-Status: ready for approval · 2026-10-17
+Status: implemented · 2026-10-18
 
 ## Intent
 
