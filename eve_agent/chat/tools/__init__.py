@@ -2,6 +2,7 @@ from eve_agent.chat.common import Tool, ToolContext, visible
 from eve_agent.chat.memory import memory_tools
 from eve_agent.chat.tools.actions import action_tools
 from eve_agent.chat.tools.brain import brain_tools
+from eve_agent.chat.tools.charts import chart_tools
 from eve_agent.chat.tools.entities import entity_tools
 from eve_agent.chat.tools.sales import sales_tools
 from eve_agent.chat.tools.utility import utility_tools
@@ -50,5 +51,6 @@ def build_tools(ctx: ToolContext) -> list[Tool]:
 		*utility_tools(ctx),
 		*action_tools(ctx),
 		*memory_tools(ctx),
+		*chart_tools(ctx),
 	]
 	return [_tracked(ctx, t) for t in tools if _offered(ctx, t)]

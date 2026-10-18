@@ -55,9 +55,12 @@ class QueryRun:
 	params: dict
 	rows: list[dict]
 	ms: int
+	# q1, q2, ... in the order result() saw the query this turn; show_chart refers to queries by it.
+	id: str = ""
 
 	def as_dict(self) -> dict:
 		return {
+			"id": self.id,
 			"title": self.title,
 			"cypher": self.cypher,
 			"params": self.params,
@@ -89,6 +92,8 @@ class ToolContext:
 	on_hidden_source: Callable[[dict], None] | None = None
 	# The tool being run, set by build_tools, so a hidden source can say where it came from.
 	current_tool: str = ""
+	# Every query result() returned this turn, by id, so show_chart can chart one without new numbers.
+	runs: dict[str, QueryRun] = field(default_factory=dict)
 
 
 @dataclass
@@ -186,6 +191,11 @@ def _drop_hidden(ctx: ToolContext, queries: list[QueryRun], sources: list[dict])
 def result(ctx: ToolContext, queries: list[QueryRun], sources: list[dict], note: str | None = None) -> dict:
 	if ctx.can_read is not None or restricted(ctx):
 		sources = _drop_hidden(ctx, queries, sources)
+	# Ids are given after the safety net, so a chart only ever sees rows the user may read. Always a fresh
+	# id: graph_schema hands back cached runs that may carry an id from an earlier turn.
+	for q in queries:
+		q.id = f"q{len(ctx.runs) + 1}"
+		ctx.runs[q.id] = q
 	seen: set[str] = set()
 	unique = []
 	for source in sources:
