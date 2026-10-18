@@ -470,6 +470,30 @@ class ScopeTests(unittest.TestCase):
 		self.assertEqual(ctx.cited, out["sources"])
 		self.assertEqual(hidden, [{"doctype": "Sales Invoice", "name": "SI-1", "tool": ""}])
 
+	def test_scope_without_can_read_fails_closed(self):
+		hidden = []
+		ctx = self.scoped({"Customer": (0,)}, on_hidden_source=hidden.append)
+		run = QueryRun("t", "RETURN 1", {}, [{"name": "SI-1"}, {"name": "X"}], 0)
+		out = result(ctx, [run], [{"doctype": "Sales Invoice", "name": "SI-1"}])
+		self.assertEqual(out["sources"], [])
+		self.assertEqual(out["queries"][0]["rows"], [{"name": "X"}])
+		self.assertEqual(len(hidden), 1)
+		from eve_agent.chat.memory import readable_refs
+
+		self.assertEqual(readable_refs(ctx, [{"doctype": "Customer", "name": "Acme"}]), [])
+		ctx.scope = None
+		self.assertEqual(len(readable_refs(ctx, [{"doctype": "Customer", "name": "Acme"}])), 1)
+
+	def test_nested_rows_naming_hidden_source_are_dropped(self):
+		ctx = self.scoped({}, can_read=lambda dt, name: name != "SI-1")
+		rows = [
+			{"nodes": [{"doctype": "Sales Invoice", "name": "SI-1"}]},
+			{"nodes": [{"doctype": "Sales Invoice", "name": "SI-10"}]},
+		]
+		run = QueryRun("t", "RETURN 1", {}, rows, 0)
+		out = result(ctx, [run], [{"doctype": "Sales Invoice", "name": "SI-1"}])
+		self.assertEqual(out["queries"][0]["rows"], [rows[1]])
+
 	def test_prompt_lists_visible_doctypes(self):
 		ctx = self.scoped({"Customer": (0,), "Sales Order": (0,), "Item": (0,), "Employee": (0,)})
 		ctx.scope.own_record_doctypes = ("Employee",)

@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 
 from pydantic import BaseModel, Field
 
-from eve_agent.chat.common import Tool, ToolContext, result
+from eve_agent.chat.common import Tool, ToolContext, restricted, result
 
 MAX_TEXT = 2000
 MAX_ENTITY_REFS = 50
@@ -102,6 +102,8 @@ def readable_refs(ctx: ToolContext, refs) -> list[dict]:
 	for ref in refs or []:
 		if not ref or not ref.get("name"):
 			continue
+		if ctx.can_read is None and restricted(ctx):
+			continue  # Fail closed: a limited scope without a read check sees no records.
 		if ctx.can_read is None or ctx.can_read(ref.get("doctype") or "", str(ref["name"])):
 			out.append(ref)
 	return out

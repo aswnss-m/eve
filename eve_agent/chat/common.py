@@ -146,11 +146,18 @@ def filter_fields_json(ctx: ToolContext, doctype: str, fields_json: str | None) 
 	return json.dumps([f for f in fields if (f.get("permlevel") or 0) in levels])
 
 
-def _mentions(row: dict, name: str) -> bool:
-	for value in row.values():
-		if value == name or (isinstance(value, list) and name in value):
-			return True
-	return False
+def restricted(ctx: ToolContext) -> bool:
+	"""True when the user has a limited scope. Without a can_read check that means nothing is readable."""
+	return ctx.scope is not None and not ctx.scope.full_access
+
+
+def _mentions(value, name: str) -> bool:
+	"""Exact match of `name` on any string/number leaf, however deep in lists and dicts."""
+	if isinstance(value, dict):
+		return any(_mentions(v, name) for v in value.values())
+	if isinstance(value, (list, tuple)):
+		return any(_mentions(v, name) for v in value)
+	return value is not None and not isinstance(value, bool) and str(value) == name
 
 
 def _drop_hidden(ctx: ToolContext, queries: list[QueryRun], sources: list[dict]) -> list[dict]:
@@ -161,7 +168,7 @@ def _drop_hidden(ctx: ToolContext, queries: list[QueryRun], sources: list[dict])
 	for source in sources:
 		key = f"{source['doctype']}|{source['name']}"
 		if key not in checked:
-			checked[key] = bool(ctx.can_read(source["doctype"], source["name"]))
+			checked[key] = bool(ctx.can_read and ctx.can_read(source["doctype"], source["name"]))
 			if not checked[key]:
 				hidden_names.add(str(source["name"]))
 				if ctx.on_hidden_source:
@@ -177,7 +184,7 @@ def _drop_hidden(ctx: ToolContext, queries: list[QueryRun], sources: list[dict])
 
 
 def result(ctx: ToolContext, queries: list[QueryRun], sources: list[dict], note: str | None = None) -> dict:
-	if ctx.can_read is not None:
+	if ctx.can_read is not None or restricted(ctx):
 		sources = _drop_hidden(ctx, queries, sources)
 	seen: set[str] = set()
 	unique = []
