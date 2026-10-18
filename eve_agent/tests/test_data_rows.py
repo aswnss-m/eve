@@ -12,6 +12,7 @@ from eve_agent.falkor.importer.data_rows import (
 	build_link_edges,
 	build_record_row,
 	coerce,
+	doctype_plan,
 	parse_lines,
 	plan_from_schema,
 	schema_node_from_export_row,
@@ -65,6 +66,16 @@ class PlanTests(unittest.TestCase):
 		self.assertEqual(so.dynamic_links, {"party": "party_type"})
 		self.assertEqual(so.tables, {"items": "Sales Order Item"})
 		self.assertIn("parent", plan_from_schema(NODES, modules=["Selling"]).children["Sales Order Item"].fetch_fields)
+
+	def test_field_levels_come_from_schema(self):
+		node = {
+			"name": "Customer",
+			"fields": [
+				{"fieldname": "credit_limit", "fieldtype": "Currency", "permlevel": 1},
+				{"fieldname": "customer_name", "fieldtype": "Data"},
+			],
+		}
+		self.assertEqual(doctype_plan(node).field_levels, {"credit_limit": 1, "customer_name": 0})
 
 	def test_export_row_booleans_are_parsed(self):
 		row = ["Sales Order Item", "Selling", "false", "false", "true", "false", "", 0, [], [], [], "[]", ""]
