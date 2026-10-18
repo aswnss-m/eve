@@ -4,20 +4,26 @@ bench --site eve.localhost run-tests --skip-before-tests --module eve_agent.test
 They use the seeded demo users (`<name>@eve-demo.local`) and skip when those are missing.
 """
 
+import re
 import unittest
 from dataclasses import replace
 from unittest.mock import patch
 
 import frappe
 import frappe.share
+from frappe.core.doctype.user.user import STANDARD_USERS
 from frappe.tests.utils import FrappeTestCase
 from frappe.utils import add_days, today
 from frappe.utils.nestedset import get_root_of
 
+from eve_agent.access.build import build_profile_graph, profile_graph_names
 from eve_agent.access.reader import ProfileReader
 from eve_agent.access.resolve import hook_restricted, is_own_record, resolve_scope
 from eve_agent.access.scope import SPECIAL_DROP, SPECIAL_KEEP, filter_plan
-from eve_agent.sync.data_sync import load_plan
+from eve_agent.falkor.importer.data_rows import FIELD_ALLOWLIST, STANDARD_FIELDS
+from eve_agent.sync import record_reader
+from eve_agent.sync.data_sync import base_data_graph, build_data_graph, load_plan
+from eve_agent.sync.schema_sync import get_graph_client
 
 TEST_TERRITORY = "Eve Test South"
 TEST_ROLE = "Eve Test Owner Role"
@@ -392,3 +398,68 @@ class ProfileReaderTests(FrappeTestCase):
 		self.assertNotIn(outside, self.names(self.ananya, "Sales Order"))
 		reader, plan = self.reader(self.ananya, "Sales Order")
 		self.assertEqual(reader.fetch_records_by_names(plan, [outside]), [])
+
+
+class ProfileGraphTests(FrappeTestCase):
+	PROFILE_GRAPH = "eve_test_profile"
+	MAIN_GRAPH = "eve_test_main"
+
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		cls.settings = frappe.get_single("Eve Agent Settings")
+		try:
+			get_graph_client(cls.settings, cls.PROFILE_GRAPH).ping()
+		except Exception:
+			raise unittest.SkipTest("FalkorDB is not reachable") from None
+		cls.rahul = seeded_user("rahul")
+		cls.plan = data_plan()
+		cls.scope = resolve_scope(cls.rahul, cls.plan)
+		cls.summary = build_profile_graph(cls.settings, cls.scope, cls.PROFILE_GRAPH)
+		cls.graph = get_graph_client(cls.settings, cls.PROFILE_GRAPH)
+
+	@classmethod
+	def tearDownClass(cls):
+		for name in (cls.PROFILE_GRAPH, cls.MAIN_GRAPH):
+			get_graph_client(cls.settings, name).delete_graph()
+		super().tearDownClass()
+
+	def count(self, cypher: str) -> int:
+		return int(self.graph.query(cypher).rows[0][0] or 0)
+
+	def test_profile_graph_names(self):
+		base = base_data_graph(self.settings)
+		self.assertEqual(profile_graph_names(self.settings, "abc"), (f"{base}_pabc", f"{base}_pabc_next"))
+
+	def test_sales_profile_has_no_accounts_nodes(self):
+		doctypes = [*ACCOUNTS_DOCTYPES, "Employee"]
+		self.assertEqual(self.count(f"MATCH (n:Record) WHERE n.doctype IN {doctypes} RETURN count(n)"), 0)
+
+	def test_no_invoice_derived_edges(self):
+		self.assertEqual(self.count("MATCH ()-[r:BOUGHT|BILLED_BY|PAID_BY|SOLD_TO]->() RETURN count(r)"), 0)
+
+	def test_order_totals_match_sql(self):
+		expected = frappe.db.sql("select sum(base_grand_total) from `tabSales Order` where docstatus=1")[0][0]
+		query = "MATCH (o:`Sales Order` {docstatus: 1}) RETURN sum(o.base_grand_total)"
+		got = self.graph.query(query).rows[0][0]
+		self.assertTrue(expected)
+		self.assertAlmostEqual(float(got), float(expected), places=2)
+
+	def test_users_kept_with_allowlisted_fields(self):
+		users = frappe.get_all("User", {"user_type": "System User", "name": ("not in", STANDARD_USERS)})
+		self.assertEqual(self.count("MATCH (n:User) RETURN count(n)"), len(users))
+		allowed = {*FIELD_ALLOWLIST["User"], *STANDARD_FIELDS, "doctype", "title"}
+		rows = self.graph.query("MATCH (n:User) UNWIND keys(n) AS k RETURN DISTINCT k").rows
+		props = {row[0] for row in rows}
+		self.assertTrue(props)
+		self.assertLessEqual(props, allowed)
+
+	def test_main_graph_build_unchanged(self):
+		default = build_data_graph(self.settings, self.MAIN_GRAPH)
+		explicit = build_data_graph(
+			self.settings, self.MAIN_GRAPH, plan=load_plan(self.settings), reader=record_reader
+		)
+		records = [re.search(r"records: (\d+)", text) for text in (default, explicit)]
+		self.assertTrue(all(records))
+		self.assertEqual(records[0].group(1), records[1].group(1))
+		self.assertGreater(int(records[0].group(1)), int(re.search(r"records: (\d+)", self.summary).group(1)))
