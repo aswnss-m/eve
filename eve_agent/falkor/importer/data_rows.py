@@ -91,6 +91,7 @@ class DocTypePlan:
 	text_fields: list[str] = field(default_factory=list)  # long text, HTML stripped
 	filters: dict = field(default_factory=dict)
 	is_child: bool = False
+	field_levels: dict[str, int] = field(default_factory=dict)  # fieldname -> permlevel
 
 	@property
 	def fetch_fields(self) -> list[str]:
@@ -155,6 +156,9 @@ def doctype_plan(node: dict, is_child: bool = False) -> DocTypePlan:
 			plan.dynamic_links[fieldname] = options
 		elif fieldtype in TABLE_FIELDTYPES and options:
 			plan.tables[fieldname] = options
+	levels = {f.get("fieldname"): int(f.get("permlevel") or 0) for f in node.get("fields", [])}
+	kept = [*plan.value_fields, *plan.text_fields, *plan.links, *plan.dynamic_links, *plan.tables]
+	plan.field_levels = {fieldname: levels.get(fieldname, 0) for fieldname in kept}
 	return plan
 
 

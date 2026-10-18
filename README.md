@@ -208,6 +208,38 @@ bench --site <site> execute eve_agent.demo.seed_people.run
 bench --site <site> sync-data
 ```
 
+### Permissions
+
+Eve answers each person only from what that person can read in Frappe. Eve shows less than Frappe would, never more. There is nothing extra to configure: Frappe's roles, DocPerms, User Permissions and field levels are the only source of truth.
+
+**Access profiles.** People who can read the same things share one *access profile*, which is its own FalkorDB graph holding only those records and fields. The profile is worked out from Frappe at question time, so two users with different roles but the same read access share a profile. The things that make profiles differ are:
+- which DocTypes the user can read (a role permission that is not "if owner");
+- which permlevels (field levels) they can read;
+- their User Permissions (Company, Territory and so on);
+- the filter a DocType's `permission_query_conditions` hook returns for them.
+
+Only **Administrator** reads the main data graph. A System Manager does not: they get an access profile like everyone else, because their permissions can be narrowed by User Permissions too.
+
+**What Eve leaves out.** Some things Frappe lets a user see are not copied into shared profile graphs, because they depend on the individual:
+- documents a user can read only because they were **shared** with them;
+- DocPerms that grant read only **"if owner"**;
+- **ToDo**, which Frappe shows each person only for themselves;
+- DocTypes whose read access depends on custom permission code that differs per user;
+- **own-employee records**: a user's own Employee record and records tied to an Employee (for example Sales Person records linked to an employee). Sales Team rows on a Customer still show the sales person's name.
+
+Eve does show every System User's name and email, as Frappe's @mention list does.
+
+**The "preparing" reply.** A profile is built in the background the first time one of its users asks a question, and rebuilt in place after permission or field-level changes. Until it is ready, that user gets "Eve is preparing data for your access level..." and Eve never answers from a broader graph meanwhile. This usually takes under a minute, and the user gets a message when it is ready. After editing DocPerms or roles that affect many users, expect this reply for a short while. If a build fails, the user is told, and the next question retries it. A System Manager can see the error in the **Eve Access Profile** list.
+
+**Settings.** In Eve Agent Settings → **Access Profiles**:
+- **Max Access Profiles** (default 20). When the limit is reached, the least recently used profile idle for at least a day is removed. If none can be removed, users are told Eve is at capacity and an Error Log is written.
+- **Drop Unused Access Profiles After (Days)** (default 14).
+- **Rebuild Access Profiles** (button, under Sync): marks every profile for rebuild and queues the builds. Use it after changing Eve's data settings if you do not want to wait for the nightly rebuild.
+
+Profiles that no user with a Chat Role maps to any more are deleted. The existing **Chat Roles** setting still decides who may chat at all.
+
+Save-speed check: <to be filled by controller>
+
 ### Troubleshooting
 
 

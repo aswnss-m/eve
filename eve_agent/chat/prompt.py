@@ -2,6 +2,7 @@
 
 from datetime import datetime, timezone
 
+from eve_agent.access.scope import AccessScope
 from eve_agent.chat.common import ChatConfig, ChatUser
 
 # Business relationships in the data graph. Kept in step with
@@ -29,7 +30,20 @@ Creating and updating records (the user confirms every write on a card in the ch
 - A record exists only when a later turn shows the proposal's status as created. Never claim it was saved before that."""
 
 
-def system_prompt(config: ChatConfig, user: ChatUser, memory: str) -> str:
+def scope_block(scope: AccessScope | None) -> str:
+	if scope is None or scope.full_access:
+		return ""
+	own = set(scope.own_record_doctypes)
+	visible = ", ".join(sorted(d for d in scope.parents if d not in own)) or "none"
+	return (
+		"\nYou can only see records this user may read in the ERP. "
+		f"Visible DocTypes: {visible}. "
+		"If a question needs data outside this list, say that answering needs access to that DocType, "
+		"which their role doesn't have. Never say the data doesn't exist and never guess it."
+	)
+
+
+def system_prompt(config: ChatConfig, user: ChatUser, memory: str, scope: AccessScope | None = None) -> str:
 	today = datetime.now(timezone.utc).date().isoformat()
 	roles = ", ".join(user.roles[:15])
 	memory_block = f"\nWhat you remember about this user:\n{memory}" if memory else ""
@@ -52,4 +66,4 @@ How to work:
 - If the user asks you to add, create or update a record and writes are not enabled, say that a System Manager can enable them in Eve Agent Settings.
 {writes_block}
 Graph model:{GLOSSARY}
-{memory_block}"""
+{memory_block}{scope_block(scope)}"""

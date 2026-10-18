@@ -37,3 +37,13 @@ def drain_now() -> dict:
 	sweep()
 	trigger_drain()
 	return {"queued": True}
+
+
+@frappe.whitelist()
+def rebuild_access_profiles() -> dict:
+	"""Mark every access profile Pending and queue its rebuild. Members are told Eve is preparing."""
+	frappe.only_for("System Manager")
+	from eve_agent.access.profiles import mark_all_pending_and_rebuild
+
+	mark_all_pending_and_rebuild()
+	return {"queued": True}

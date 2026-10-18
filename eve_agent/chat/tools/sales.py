@@ -7,9 +7,25 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from eve_agent.chat.common import Tool, ToolContext, iso_days_ago, refs, result
+from eve_agent.chat.common import Tool, ToolContext, iso_days_ago, refs, result, visible
 
 DATE_PATTERN = r"^\d{4}-\d{2}-\d{2}$"
+
+SALES_ORDERS_NOTE = (
+	"Based on submitted sales orders: invoices need access to Sales Invoice, which you don't have."
+)
+PURCHASE_ORDERS_NOTE = (
+	"Based on submitted purchase orders: purchase invoices need access to Purchase Invoice, which you don't have."
+)
+OUTSTANDING_NOTE = (
+	"Outstanding amounts need access to Sales Invoice, which you don't have; ranked by order value instead."
+)
+NO_REVENUE_NOTE = (
+	"Revenue at risk isn't available: it needs access to Sales Invoice or Sales Order, which you don't have."
+)
+NO_SALES_NOTE = (
+	"Sales figures aren't available: they need access to Sales Invoice or Sales Order, which you don't have."
+)
 
 
 def invoice_filter(v: str) -> str:
@@ -17,6 +33,14 @@ def invoice_filter(v: str) -> str:
 	return (
 		f"{v}.docstatus = 1 AND coalesce({v}.is_return, 0) = 0 "
 		f"AND ($date_from IS NULL OR {v}.posting_date >= $date_from) AND ($date_to IS NULL OR {v}.posting_date <= $date_to)"
+	)
+
+
+def order_filter(v: str) -> str:
+	# Submitted orders in the period: the fallback when invoices are out of scope.
+	return (
+		f"{v}.docstatus = 1 AND ($date_from IS NULL OR {v}.transaction_date >= $date_from) "
+		f"AND ($date_to IS NULL OR {v}.transaction_date <= $date_to)"
 	)
 
 
@@ -56,6 +80,91 @@ OPTIONAL MATCH (s)-[:SUPPLIES]->(i:Item)
 WITH s, spend, invoices, last_invoice, count(i) AS items_supplied
 RETURN s.name AS supplier, s.supplier_group AS supplier_group, spend, invoices, last_invoice, items_supplied
 ORDER BY {order_by} DESC LIMIT $limit"""
+
+
+def top_selling_items_orders_cypher(order_by: str) -> str:
+	return f"""
+MATCH (so:`Sales Order`)-[k:CONTAINS]->(i:Item)
+WHERE {order_filter("so")} AND ($item_group IS NULL OR i.item_group = $item_group)
+OPTIONAL MATCH (so)-[:FOR_CUSTOMER]->(c:Customer)
+WITH i, sum(k.qty) AS qty, sum(k.amount) AS amount, count(DISTINCT so) AS orders, count(DISTINCT c) AS customers
+RETURN i.name AS item, i.item_name AS item_name, i.item_group AS item_group, qty, amount, orders, customers
+ORDER BY {order_by} DESC LIMIT $limit"""
+
+
+def top_customers_orders_cypher(order_by: str) -> str:
+	return f"""
+MATCH (c:Customer)<-[:FOR_CUSTOMER]-(so:`Sales Order`)
+WHERE {order_filter("so")}
+  AND ($territory IS NULL OR c.territory = $territory) AND ($customer_group IS NULL OR c.customer_group = $customer_group)
+WITH c, sum(so.base_grand_total) AS revenue, count(so) AS orders, max(so.transaction_date) AS last_invoice
+OPTIONAL MATCH (c)<-[:FOR_CUSTOMER]-(so2:`Sales Order`)-[:CONTAINS]->(i:Item) WHERE so2.docstatus = 1
+WITH c, revenue, orders, last_invoice, count(DISTINCT i) AS distinct_items
+RETURN c.name AS customer, c.customer_group AS customer_group, c.territory AS territory,
+       revenue, orders, null AS outstanding, last_invoice, distinct_items
+ORDER BY {order_by} DESC LIMIT $limit"""
+
+
+def top_suppliers_orders_cypher(order_by: str) -> str:
+	return f"""
+MATCH (s:Supplier)<-[:FROM_SUPPLIER]-(po:`Purchase Order`)
+WHERE {order_filter("po")}
+WITH s, sum(po.base_grand_total) AS spend, count(po) AS orders, max(po.transaction_date) AS last_invoice
+OPTIONAL MATCH (s)<-[:FROM_SUPPLIER]-(po2:`Purchase Order`)-[:CONTAINS]->(i:Item) WHERE po2.docstatus = 1
+WITH s, spend, orders, last_invoice, count(DISTINCT i) AS items_supplied
+RETURN s.name AS supplier, s.supplier_group AS supplier_group, spend, orders, last_invoice, items_supplied
+ORDER BY {order_by} DESC LIMIT $limit"""
+
+
+ALSO_BOUGHT_ORDERS = """
+MATCH (i:Item {name: $item})<-[:CONTAINS]-(so:`Sales Order`)-[:FOR_CUSTOMER]->(c:Customer)
+WHERE so.docstatus = 1
+WITH DISTINCT i, c
+MATCH (c)<-[:FOR_CUSTOMER]-(so2:`Sales Order`)-[b:CONTAINS]->(j:Item)
+WHERE so2.docstatus = 1 AND j <> i
+RETURN j.name AS item, j.item_name AS item_name, count(DISTINCT c) AS shared_customers,
+       sum(b.amount) AS amount, collect(DISTINCT c.name)[0..5] AS example_customers
+ORDER BY shared_customers DESC, amount DESC LIMIT $limit"""
+
+DORMANT_CUSTOMERS_ORDERS = """
+MATCH (c:Customer)<-[:FOR_CUSTOMER]-(so:`Sales Order`)
+WHERE so.docstatus = 1
+WITH c, sum(so.base_grand_total) AS lifetime_revenue, count(so) AS orders, max(so.transaction_date) AS last_invoice
+WHERE last_invoice < $cutoff AND lifetime_revenue >= $min_revenue
+RETURN c.name AS customer, c.territory AS territory, lifetime_revenue, orders, last_invoice
+ORDER BY lifetime_revenue DESC LIMIT $limit"""
+
+
+def single_source_items_cypher(purchase_invoices: bool, revenue: str) -> str:
+	"""Items with one supplier. Suppliers come from invoices or purchase orders; revenue from the
+	invoice-derived BOUGHT edges ("invoices"), sales orders ("orders") or nothing ("none")."""
+	if purchase_invoices and revenue == "invoices":
+		return SINGLE_SOURCE_ITEMS
+	if purchase_invoices:
+		suppliers = "MATCH (s:Supplier)-[:SUPPLIES]->(i:Item)\nWITH i, collect(s.name) AS suppliers"
+	else:
+		suppliers = (
+			"MATCH (s:Supplier)<-[:FROM_SUPPLIER]-(po:`Purchase Order`)-[:CONTAINS]->(i:Item)\n"
+			"WHERE po.docstatus = 1\nWITH DISTINCT s, i\nWITH i, collect(s.name) AS suppliers"
+		)
+	head = f"{suppliers}\nWHERE size(suppliers) = 1 AND ($item IS NULL OR i.name = $item)\n"
+	columns = "RETURN i.name AS item, i.item_name AS item_name, suppliers[0] AS only_supplier,\n"
+	if revenue == "invoices":
+		tail = (
+			"OPTIONAL MATCH (c:Customer)-[b:BOUGHT]->(i)\n"
+			+ columns
+			+ "       sum(coalesce(b.amount, 0)) AS revenue_at_risk, count(c) AS customers\n"
+		)
+	elif revenue == "orders":
+		tail = (
+			"OPTIONAL MATCH (c:Customer)<-[:FOR_CUSTOMER]-(so:`Sales Order`)-[k:CONTAINS]->(i) "
+			"WHERE so.docstatus = 1\n"
+			+ columns
+			+ "       sum(coalesce(k.amount, 0)) AS revenue_at_risk, count(DISTINCT c) AS customers\n"
+		)
+	else:
+		tail = columns + "       null AS revenue_at_risk, null AS customers\n"
+	return "\n" + head + tail + "ORDER BY revenue_at_risk DESC LIMIT $limit"
 
 
 ALSO_BOUGHT = """
@@ -124,9 +233,10 @@ class SupplierRiskArgs(BaseModel):
 
 def sales_tools(ctx: ToolContext) -> list[Tool]:
 	def run_top_selling_items(args: TopSellingItemsArgs) -> dict:
+		orders = not visible(ctx, "Sales Invoice")
 		run = ctx.data.ro(
 			"Top selling items",
-			top_selling_items_cypher(args.by),
+			top_selling_items_orders_cypher(args.by) if orders else top_selling_items_cypher(args.by),
 			{
 				"date_from": args.date_from,
 				"date_to": args.date_to,
@@ -134,12 +244,19 @@ def sales_tools(ctx: ToolContext) -> list[Tool]:
 				"limit": args.limit,
 			},
 		)
-		return result(ctx, [run], refs(run.rows, "Item", "item", "item_name"))
+		note = SALES_ORDERS_NOTE if orders else None
+		return result(ctx, [run], refs(run.rows, "Item", "item", "item_name"), note)
 
 	def run_top_customers(args: TopCustomersArgs) -> dict:
+		if not visible(ctx, "Sales Invoice"):
+			by = {"invoices": "orders", "outstanding": "revenue"}.get(args.by, args.by)
+			cypher = top_customers_orders_cypher(by)
+			note = OUTSTANDING_NOTE if args.by == "outstanding" else SALES_ORDERS_NOTE
+		else:
+			cypher, note = top_customers_cypher(args.by), None
 		run = ctx.data.ro(
 			"Top customers",
-			top_customers_cypher(args.by),
+			cypher,
 			{
 				"date_from": args.date_from,
 				"date_to": args.date_to,
@@ -148,40 +265,66 @@ def sales_tools(ctx: ToolContext) -> list[Tool]:
 				"limit": args.limit,
 			},
 		)
-		return result(ctx, [run], refs(run.rows, "Customer", "customer"))
+		return result(ctx, [run], refs(run.rows, "Customer", "customer"), note)
 
 	def run_top_suppliers(args: TopSuppliersArgs) -> dict:
+		orders = not visible(ctx, "Purchase Invoice")
+		if orders:
+			cypher = top_suppliers_orders_cypher("orders" if args.by == "invoices" else args.by)
+		else:
+			cypher = top_suppliers_cypher(args.by)
 		run = ctx.data.ro(
-			"Top suppliers",
-			top_suppliers_cypher(args.by),
-			{"date_from": args.date_from, "date_to": args.date_to, "limit": args.limit},
+			"Top suppliers", cypher, {"date_from": args.date_from, "date_to": args.date_to, "limit": args.limit}
 		)
-		return result(ctx, [run], refs(run.rows, "Supplier", "supplier"))
+		note = PURCHASE_ORDERS_NOTE if orders else None
+		return result(ctx, [run], refs(run.rows, "Supplier", "supplier"), note)
 
 	def also_bought(args: AlsoBoughtArgs) -> dict:
+		orders = not visible(ctx, "Sales Invoice")
 		run = ctx.data.ro(
-			"Customers who bought this also bought", ALSO_BOUGHT, {"item": args.item, "limit": args.limit}
+			"Customers who bought this also bought",
+			ALSO_BOUGHT_ORDERS if orders else ALSO_BOUGHT,
+			{"item": args.item, "limit": args.limit},
 		)
 		return result(
-			ctx, [run], [{"doctype": "Item", "name": args.item}, *refs(run.rows, "Item", "item", "item_name")]
+			ctx,
+			[run],
+			[{"doctype": "Item", "name": args.item}, *refs(run.rows, "Item", "item", "item_name")],
+			SALES_ORDERS_NOTE if orders else None,
 		)
 
 	def dormant_customers(args: DormantCustomersArgs) -> dict:
+		orders = not visible(ctx, "Sales Invoice")
 		run = ctx.data.ro(
 			"Dormant customers",
-			DORMANT_CUSTOMERS,
+			DORMANT_CUSTOMERS_ORDERS if orders else DORMANT_CUSTOMERS,
 			{"cutoff": iso_days_ago(args.days), "min_revenue": args.min_revenue, "limit": args.limit},
 		)
-		return result(ctx, [run], refs(run.rows, "Customer", "customer"))
+		return result(ctx, [run], refs(run.rows, "Customer", "customer"), SALES_ORDERS_NOTE if orders else None)
 
 	def supplier_risk(args: SupplierRiskArgs) -> dict:
+		purchase_invoices = visible(ctx, "Purchase Invoice")
+		if visible(ctx, "Sales Invoice"):
+			revenue = "invoices"
+		else:
+			revenue = "orders" if visible(ctx, "Sales Order") else "none"
+		notes = []
+		if not purchase_invoices:
+			notes.append(PURCHASE_ORDERS_NOTE)
+		if revenue == "orders":
+			notes.append(SALES_ORDERS_NOTE)
+		elif revenue == "none":
+			notes.append(NO_REVENUE_NOTE)
 		run = ctx.data.ro(
-			"Single-source items", SINGLE_SOURCE_ITEMS, {"item": args.item, "limit": args.limit}
+			"Single-source items",
+			single_source_items_cypher(purchase_invoices, revenue),
+			{"item": args.item, "limit": args.limit},
 		)
 		return result(
 			ctx,
 			[run],
 			[*refs(run.rows, "Item", "item", "item_name"), *refs(run.rows, "Supplier", "only_supplier")],
+			" ".join(notes) or None,
 		)
 
 	return [

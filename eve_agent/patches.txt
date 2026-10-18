@@ -6,3 +6,4 @@
 # Patches added in this section will be executed after doctypes are migrated
 eve_agent.patches.set_agent_defaults
 eve_agent.patches.set_sync_defaults
+eve_agent.patches.set_access_profile_defaults

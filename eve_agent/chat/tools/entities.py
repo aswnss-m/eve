@@ -5,7 +5,8 @@ import re
 
 from pydantic import BaseModel, Field
 
-from eve_agent.chat.common import Tool, ToolContext, label, refs, result
+from eve_agent.chat.common import Tool, ToolContext, label, refs, result, visible
+from eve_agent.chat.tools.sales import NO_SALES_NOTE, SALES_ORDERS_NOTE
 from eve_agent.falkor.cypher.data_queries import FULLTEXT_LABELS
 
 FIND_FULLTEXT = """
@@ -37,6 +38,51 @@ CUSTOMER_ITEMS = """
 MATCH (c:Customer {name: $name})-[b:BOUGHT]->(i:Item)
 RETURN i.name AS item, i.item_name AS item_name, b.qty AS qty, b.amount AS amount, b.invoices AS invoices
 ORDER BY amount DESC LIMIT 10"""
+
+CUSTOMER_SUMMARY_ORDERS = """
+MATCH (c:Customer {name: $name})
+OPTIONAL MATCH (c)<-[:FOR_CUSTOMER]-(so:`Sales Order`) WHERE so.docstatus = 1
+WITH c, sum(so.base_grand_total) AS revenue, count(so) AS orders,
+     min(so.transaction_date) AS first_invoice, max(so.transaction_date) AS last_invoice
+OPTIONAL MATCH (c)-[:IN_TERRITORY]->(t:Territory)
+OPTIONAL MATCH (c)-[:IN_GROUP]->(g:`Customer Group`)
+OPTIONAL MATCH (l:Lead)-[:CONVERTED_TO]->(c)
+RETURN c.name AS customer, c.customer_type AS type, t.name AS territory, g.name AS customer_group,
+       l.name AS from_lead, revenue, orders, null AS outstanding, first_invoice, last_invoice"""
+
+CUSTOMER_SUMMARY_NO_SALES = """
+MATCH (c:Customer {name: $name})
+OPTIONAL MATCH (c)-[:IN_TERRITORY]->(t:Territory)
+OPTIONAL MATCH (c)-[:IN_GROUP]->(g:`Customer Group`)
+OPTIONAL MATCH (l:Lead)-[:CONVERTED_TO]->(c)
+RETURN c.name AS customer, c.customer_type AS type, t.name AS territory, g.name AS customer_group,
+       l.name AS from_lead, null AS revenue, null AS orders, null AS outstanding,
+       null AS first_invoice, null AS last_invoice"""
+
+CUSTOMER_ITEMS_ORDERS = """
+MATCH (c:Customer {name: $name})<-[:FOR_CUSTOMER]-(so:`Sales Order`)-[k:CONTAINS]->(i:Item)
+WHERE so.docstatus = 1
+RETURN i.name AS item, i.item_name AS item_name, sum(k.qty) AS qty, sum(k.amount) AS amount, count(DISTINCT so) AS orders
+ORDER BY amount DESC LIMIT 10"""
+
+CUSTOMER_DOCS_ORDERS = """
+MATCH (c:Customer {name: $name})<-[:FOR_CUSTOMER]-(d:Record)
+WHERE d.doctype IN ['Quotation', 'Sales Order']
+RETURN d.doctype AS doctype, d.name AS name, coalesce(d.posting_date, d.transaction_date) AS date,
+       d.status AS status, d.base_grand_total AS amount, null AS paid
+ORDER BY date DESC LIMIT 10"""
+
+ITEM_BUYERS_ORDERS = """
+MATCH (i:Item {name: $name})<-[k:CONTAINS]-(so:`Sales Order`)-[:FOR_CUSTOMER]->(c:Customer)
+WHERE so.docstatus = 1
+RETURN c.name AS customer, sum(k.qty) AS qty, sum(k.amount) AS amount, count(DISTINCT so) AS orders
+ORDER BY amount DESC LIMIT 10"""
+
+ITEM_MONTHLY_SALES_ORDERS = """
+MATCH (so:`Sales Order`)-[k:CONTAINS]->(i:Item {name: $name})
+WHERE so.docstatus = 1
+RETURN substring(so.transaction_date, 0, 7) AS month, sum(k.qty) AS qty, sum(k.amount) AS amount
+ORDER BY month DESC LIMIT 12"""
 
 CUSTOMER_DOCS = """
 MATCH (c:Customer {name: $name})<-[:FOR_CUSTOMER]-(d:Record)
@@ -142,32 +188,50 @@ def entity_tools(ctx: ToolContext) -> list[Tool]:
 
 	def customer_profile(args: CustomerProfileArgs) -> dict:
 		params = {"name": args.customer}
-		runs = [
-			ctx.data.ro("Customer summary", CUSTOMER_SUMMARY, params),
-			ctx.data.ro("Top items bought", CUSTOMER_ITEMS, params),
-			ctx.data.ro("Recent documents", CUSTOMER_DOCS, params),
-		]
+		invoices = visible(ctx, "Sales Invoice")
+		orders = not invoices and visible(ctx, "Sales Order")
+		if invoices:
+			summary, items, docs = CUSTOMER_SUMMARY, CUSTOMER_ITEMS, CUSTOMER_DOCS
+		elif orders:
+			summary, items, docs = CUSTOMER_SUMMARY_ORDERS, CUSTOMER_ITEMS_ORDERS, CUSTOMER_DOCS_ORDERS
+		else:
+			summary, items, docs = CUSTOMER_SUMMARY_NO_SALES, None, CUSTOMER_DOCS_ORDERS
+		runs = [ctx.data.ro("Customer summary", summary, params)]
+		if items:
+			runs.append(ctx.data.ro("Top items bought", items, params))
+		runs.append(ctx.data.ro("Recent documents", docs, params))
 		if not runs[0].rows:
 			raise ValueError(f"No Customer named '{args.customer}'. Try find_entity.")
 		sources = [
 			{"doctype": "Customer", "name": args.customer},
-			*refs(runs[1].rows, "Item", "item", "item_name"),
-			*({"doctype": str(r.get("doctype")), "name": str(r.get("name"))} for r in runs[2].rows),
+			*(refs(runs[1].rows, "Item", "item", "item_name") if items else []),
+			*({"doctype": str(r.get("doctype")), "name": str(r.get("name"))} for r in runs[-1].rows),
 		]
-		return result(ctx, runs, sources)
+		note = None if invoices else SALES_ORDERS_NOTE if orders else NO_SALES_NOTE
+		return result(ctx, runs, sources, note)
 
 	def item_profile(args: ItemProfileArgs) -> dict:
 		params = {"name": args.item}
-		runs = [
-			ctx.data.ro("Item, suppliers, stock and BOMs", ITEM_SUPPLY, params),
-			ctx.data.ro("Top buyers", ITEM_BUYERS, params),
-			ctx.data.ro("Monthly sales", ITEM_MONTHLY_SALES, params),
-		]
+		invoices = visible(ctx, "Sales Invoice")
+		orders = not invoices and visible(ctx, "Sales Order")
+		runs = [ctx.data.ro("Item, suppliers, stock and BOMs", ITEM_SUPPLY, params)]
+		if invoices:
+			runs += [
+				ctx.data.ro("Top buyers", ITEM_BUYERS, params),
+				ctx.data.ro("Monthly sales", ITEM_MONTHLY_SALES, params),
+			]
+		elif orders:
+			runs += [
+				ctx.data.ro("Top buyers", ITEM_BUYERS_ORDERS, params),
+				ctx.data.ro("Monthly sales", ITEM_MONTHLY_SALES_ORDERS, params),
+			]
 		if not runs[0].rows:
 			raise ValueError(f"No Item with code '{args.item}'. Try find_entity.")
-		return result(
-			ctx, runs, [{"doctype": "Item", "name": args.item}, *refs(runs[1].rows, "Customer", "customer")]
-		)
+		sources = [{"doctype": "Item", "name": args.item}]
+		if len(runs) > 1:
+			sources += refs(runs[1].rows, "Customer", "customer")
+		note = None if invoices else SALES_ORDERS_NOTE if orders else NO_SALES_NOTE
+		return result(ctx, runs, sources, note)
 
 	def explain_connection(args: ExplainConnectionArgs) -> dict:
 		cypher = shortest_path(label(ctx, args.from_doctype), label(ctx, args.to_doctype))

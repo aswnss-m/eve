@@ -15,7 +15,19 @@ def after_install():
 
 def after_migrate():
 	ensure_sync_status_block()
+	mark_access_profiles_pending()
 	enqueue_schema_sync()
+
+
+def mark_access_profiles_pending():
+	"""A migrate may move fields to other permlevels: no profile graph is used until the schema sync queued
+	next rebuilds them (run_schema_sync). Never breaks the migrate."""
+	try:
+		from eve_agent.access.profiles import mark_all_pending
+
+		mark_all_pending()
+	except Exception:
+		frappe.log_error(title="Eve Agent: could not mark access profiles for rebuild")
 
 
 def ensure_sync_status_block():

@@ -57,7 +57,21 @@ def run_schema_sync() -> str:
 	)
 	frappe.db.commit()
 	publish_sync_done("schema", status, text)
+	if status == "Success":
+		_rebuild_access_profiles()
 	return text
+
+
+def _rebuild_access_profiles() -> None:
+	"""Profile plans come from the schema graph, which may now have other fields: every profile is
+	rebuilt. Never turns the sync into a failure."""
+	try:
+		from eve_agent.access.profiles import mark_all_pending_and_rebuild
+
+		mark_all_pending_and_rebuild()
+		frappe.db.commit()  # Sends the builds (queued on commit); `bench sync-schema` won't commit later.
+	except Exception:
+		frappe.log_error(title="Eve Agent: could not queue access profile rebuilds")
 
 
 def enqueue_schema_sync() -> None:

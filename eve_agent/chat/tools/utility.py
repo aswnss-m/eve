@@ -6,7 +6,7 @@ import time
 
 from pydantic import BaseModel, Field
 
-from eve_agent.chat.common import QueryRun, Tool, ToolContext, result
+from eve_agent.chat.common import QueryRun, Tool, ToolContext, filter_fields_json, result, visible
 from eve_agent.falkor.query.readonly import assert_read_only
 
 SCHEMA_LABELS = """
@@ -57,6 +57,14 @@ def _describe_fields(fields_json: str | None) -> list[str]:
 	return out
 
 
+def _kept_links(links: list | None, original: str | None, kept: str) -> list:
+	"""Drop the links that come from a field the user may not read."""
+	dropped = {f.get("fieldname") for f in json.loads(original or "[]")} - {
+		f.get("fieldname") for f in json.loads(kept)
+	}
+	return [link for link in links or [] if link.get("field") not in dropped]
+
+
 def utility_tools(ctx: ToolContext) -> list[Tool]:
 	def graph_schema(_args: BaseModel) -> dict:
 		cached = _schema_cache.get(ctx.data.name)
@@ -71,11 +79,15 @@ def utility_tools(ctx: ToolContext) -> list[Tool]:
 		return result(ctx, runs, [])
 
 	def describe_doctype(args: DescribeDoctypeArgs) -> dict:
+		if not visible(ctx, args.doctype):
+			raise ValueError(f"You don't have access to {args.doctype}.")
 		run = ctx.schema.ro(f"Schema of {args.doctype}", DESCRIBE_DOCTYPE, {"doctype": args.doctype})
 		if not run.rows:
 			raise ValueError(f"Unknown DocType '{args.doctype}'.")
 		for row in run.rows:
-			row["fields"] = _describe_fields(row.get("fields"))
+			kept = filter_fields_json(ctx, args.doctype, row.get("fields"))
+			row["links"] = _kept_links(row.get("links"), row.get("fields"), kept)
+			row["fields"] = _describe_fields(kept)
 		return result(ctx, [run], [])
 
 	def log(purpose: str, limited: str, run: QueryRun | None, error: str | None, started: float) -> None:

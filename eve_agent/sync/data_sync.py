@@ -60,15 +60,16 @@ def load_plan(settings) -> DataPlan:
 	)
 
 
-def build_data_graph(settings, graph_name: str) -> str:
-	plan = load_plan(settings)
+def build_data_graph(settings, graph_name: str, plan: DataPlan | None = None, reader=record_reader) -> str:
+	"""Build `graph_name`. A profile build passes its filtered `plan` and a `reader` for the profile."""
+	plan = plan or load_plan(settings)
 	limit = cint(settings.max_records_per_doctype) or DEFAULT_MAX_RECORDS
 	data_client = get_graph_client(settings, graph_name)
 	summary = import_data(
 		data_client,
 		plan,
-		fetch_records=partial(record_reader.fetch_records, limit=limit),
-		fetch_children=record_reader.fetch_children,
+		fetch_records=partial(reader.fetch_records, limit=limit),
+		fetch_children=reader.fetch_children,
 		fulltext_labels=(*FULLTEXT_LABELS, *extra_doctypes(settings)),
 	)
 	business = apply_business_rules(data_client)
@@ -79,7 +80,9 @@ def build_data_graph(settings, graph_name: str) -> str:
 	return text
 
 
-def sync_keys_on_graph(settings, graph_name: str | None, keys, plan: DataPlan | None = None) -> IncrementalSummary:
+def sync_keys_on_graph(
+	settings, graph_name: str | None, keys, plan: DataPlan | None = None, reader=record_reader
+) -> IncrementalSummary:
 	"""Upsert the records behind `keys` into `graph_name` (default: the active graph)."""
 	plan = plan or load_plan(settings)
 	client = get_graph_client(settings, graph_name or active_data_graph(settings))
@@ -87,18 +90,20 @@ def sync_keys_on_graph(settings, graph_name: str | None, keys, plan: DataPlan | 
 		client,
 		plan,
 		keys,
-		fetch_by_names=record_reader.fetch_records_by_names,
-		fetch_children_by_parents=record_reader.fetch_children_by_parents,
+		fetch_by_names=reader.fetch_records_by_names,
+		fetch_children_by_parents=reader.fetch_children_by_parents,
 	)
 
 
-def catch_up(settings, graph_name: str, plan: DataPlan, since_datetime, since_timestamp: float) -> IncrementalSummary:
+def catch_up(
+	settings, graph_name: str, plan: DataPlan, since_datetime, since_timestamp: float, reader=record_reader
+) -> IncrementalSummary:
 	"""Apply what changed while a rebuild ran: records modified since, plus queued deletes and renames."""
 	from eve_agent.sync.refresh import changelog_since, modified_keys_since
 
 	keys = set(modified_keys_since(settings, since_datetime))
 	keys.update(changelog_since(since_timestamp))
-	return sync_keys_on_graph(settings, graph_name, sorted(keys), plan)
+	return sync_keys_on_graph(settings, graph_name, sorted(keys), plan, reader)
 
 
 def run_data_sync() -> str:
@@ -110,6 +115,7 @@ def run_data_sync() -> str:
 
 
 def _run_data_sync() -> str:
+	from eve_agent.access.profiles import enqueue_profile_rebuilds
 	from eve_agent.sync.refresh import GRAPH_WRITE_LOCK
 
 	settings = frappe.get_single(SETTINGS_DOCTYPE)
@@ -140,6 +146,13 @@ def _run_data_sync() -> str:
 	frappe.db.set_single_value(SETTINGS_DOCTYPE, values)
 	frappe.db.commit()
 	publish_sync_done("data", status, text)
+	if status == "Success":
+		# Profile graphs follow the main one. Queueing them never turns this sync into a failure.
+		try:
+			enqueue_profile_rebuilds()
+			frappe.db.commit()  # Sends the builds (queued on commit); `bench sync-data` won't commit later.
+		except Exception:
+			frappe.log_error(title="Eve Agent: could not queue access profile rebuilds")
 	return text
 
 

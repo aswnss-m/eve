@@ -5,7 +5,7 @@ This is the only module in the sync path that talks to Frappe's DB.
 
 import frappe
 
-FIELD_KEYS = ("fieldname", "fieldtype", "options", "label", "reqd")
+FIELD_KEYS = ("fieldname", "fieldtype", "options", "label", "reqd", "permlevel")
 
 
 def read_doctype_metas() -> list[dict]:
