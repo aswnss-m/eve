@@ -3,7 +3,7 @@ env/bin/python -m unittest eve_agent.tests.test_falkor_pure  (from apps/eve_agen
 
 import unittest
 
-from eve_agent.falkor.connection import build_url
+from eve_agent.falkor.connection import GraphClient, build_url
 from eve_agent.falkor.importer.schema_import import SchemaImportSummary
 from eve_agent.falkor.importer.schema_rows import build_doctype_row, build_edges
 from eve_agent.falkor.literals import to_literal, with_params
@@ -48,6 +48,24 @@ class LiteralTests(unittest.TestCase):
 	def test_with_params_prefix(self):
 		self.assertEqual(with_params("RETURN $k", {"k": "x"}), "CYPHER k='x' RETURN $k")
 		self.assertEqual(with_params("RETURN 1", None), "RETURN 1")
+
+
+class GraphClientTests(unittest.TestCase):
+	class Redis:
+		def __init__(self):
+			self.sent = []
+
+		def execute_command(self, *args):
+			self.sent.append(args)
+			return [[[1, "n"]], []]
+
+	def test_read_timeout_is_sent_only_when_asked(self):
+		conn = self.Redis()
+		client = GraphClient(conn, "g")
+		client.ro_rows("RETURN 1 AS n")
+		client.ro_rows("RETURN 1 AS n", timeout_ms=2000)
+		self.assertEqual(conn.sent[0], ("GRAPH.RO_QUERY", "g", "RETURN 1 AS n", "--compact"))
+		self.assertEqual(conn.sent[1], ("GRAPH.RO_QUERY", "g", "RETURN 1 AS n", "--compact", "TIMEOUT", 2000))
 
 
 class ReadOnlyTests(unittest.TestCase):
