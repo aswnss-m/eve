@@ -51,12 +51,16 @@ def resolve_scope(user: str, plan: DataPlan) -> AccessScope:
 
 def is_own_record(allow: str, doc: str, user: str) -> bool:
 	"""True when a Link-to-User field of `allow` holds `user` on record `doc` (e.g. Employee.user_id)."""
+	return _holds_user(allow, [doc], user)
+
+
+def _holds_user(allow: str, docs: list[str], user: str) -> bool:
+	"""True when a Link-to-User field of `allow` holds `user` on any of `docs`. One query."""
 	user_links = frappe.get_meta(allow).get("fields", {"fieldtype": "Link", "options": "User"})
-	fields = [df.fieldname for df in user_links]
-	if not fields:
+	if not user_links or not docs:
 		return False
-	values = frappe.db.get_value(allow, doc, fields, as_dict=True)
-	return bool(values) and user in values.values()
+	or_filters = {df.fieldname: user for df in user_links}
+	return bool(frappe.get_all(allow, filters={"name": ("in", docs)}, or_filters=or_filters, limit=1))
 
 
 def hook_restricted(doctype: str, user: str) -> bool:
@@ -87,15 +91,16 @@ def _fully_read(doctype: str, readable: dict[str, tuple[int, ...]]) -> bool:
 
 
 def _user_permissions(user: str) -> tuple[dict[str, tuple[tuple[str, str], ...]], tuple[str, ...]]:
-	"""(allow -> sorted (doc, applicable_for) pairs, own-record DocTypes). Own-record entries are left out."""
-	out, own = {}, set()
+	"""(allow -> sorted (doc, applicable_for) pairs, own-record DocTypes).
+
+	When any entry of `allow` is the user's own record, all of its entries are left out (ruling R8).
+	The rest, such as a manager's reports expanded from the Employee tree, would only split profiles:
+	the own-record rule (empty links only) is narrower than anything they allow.
+	"""
+	out, own = {}, []
 	for allow, entries in frappe.permissions.get_user_permissions(user).items():
-		pairs = set()
-		for entry in entries:
-			if is_own_record(allow, entry["doc"], user):
-				own.add(allow)
-			else:
-				pairs.add((entry["doc"], entry.get("applicable_for") or ""))
-		if pairs:
-			out[allow] = tuple(sorted(pairs))
+		if _holds_user(allow, [entry["doc"] for entry in entries], user):
+			own.append(allow)
+		else:
+			out[allow] = tuple(sorted({(e["doc"], e.get("applicable_for") or "") for e in entries}))
 	return out, tuple(sorted(own))
