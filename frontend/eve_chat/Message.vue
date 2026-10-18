@@ -6,6 +6,7 @@
 			<template v-for="(part, i) in message.parts" :key="i">
 				<div v-if="part.type === 'text' && part.text" class="eve-md" v-html="html(part.text)"></div>
 				<ActionCard v-else-if="isAction(part)" :part="part" @changed="persist" />
+				<ChartCard v-else-if="isChart(part)" :part="part" />
 				<ToolStep v-else-if="isTool(part)" :part="part" />
 			</template>
 
@@ -37,6 +38,7 @@
 <script setup>
 import { computed, inject, onBeforeUnmount, ref, watch } from "vue";
 import ActionCard from "./ActionCard.vue";
+import ChartCard from "./ChartCard.vue";
 import ToolStep from "./ToolStep.vue";
 import { renderMarkdown } from "./markdown.js";
 import { doctypeOf, lookupRecords } from "./locate.js";
@@ -73,6 +75,11 @@ function isTool(part) {
 // A record proposal: the tool output carries an action for the user to confirm.
 function isAction(part) {
 	return isTool(part) && part.state === "output-available" && part.output && part.output.action;
+}
+
+// A chart from show_chart: the output carries a spec built from one query's rows.
+function isChart(part) {
+	return isTool(part) && part.state === "output-available" && part.output && part.output.chart;
 }
 
 const outputs = computed(() =>

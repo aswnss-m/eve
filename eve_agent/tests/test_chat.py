@@ -52,6 +52,9 @@ EXPECTED_TOOLS = {
 	"propose_record",
 	"recall",
 	"remember_insight",
+	"show_chart",
+	"sales_trend",
+	"purchase_trend",
 }
 
 
