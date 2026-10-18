@@ -77,6 +77,10 @@ class PlanTests(unittest.TestCase):
 		}
 		self.assertEqual(doctype_plan(node).field_levels, {"credit_limit": 1, "customer_name": 0})
 
+	def test_text_field_level_comes_from_schema(self):
+		node = {"name": "Comment", "fields": [{"fieldname": "content", "fieldtype": "Long Text", "permlevel": 1}]}
+		self.assertEqual(doctype_plan(node).field_levels, {"content": 1})
+
 	def test_export_row_booleans_are_parsed(self):
 		row = ["Sales Order Item", "Selling", "false", "false", "true", "false", "", 0, [], [], [], "[]", ""]
 		node = schema_node_from_export_row(row)

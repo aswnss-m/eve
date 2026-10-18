@@ -156,10 +156,9 @@ def doctype_plan(node: dict, is_child: bool = False) -> DocTypePlan:
 			plan.dynamic_links[fieldname] = options
 		elif fieldtype in TABLE_FIELDTYPES and options:
 			plan.tables[fieldname] = options
-		if fieldname in plan.value_fields or fieldname in plan.links or fieldname in plan.dynamic_links or fieldname in plan.tables:
-			plan.field_levels[fieldname] = int(f.get("permlevel") or 0)
-	for fieldname in plan.text_fields:
-		plan.field_levels.setdefault(fieldname, 0)
+	levels = {f.get("fieldname"): int(f.get("permlevel") or 0) for f in node.get("fields", [])}
+	kept = [*plan.value_fields, *plan.text_fields, *plan.links, *plan.dynamic_links, *plan.tables]
+	plan.field_levels = {fieldname: levels.get(fieldname, 0) for fieldname in kept}
 	return plan
 
 
