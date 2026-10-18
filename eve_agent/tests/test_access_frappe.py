@@ -4,6 +4,7 @@ bench --site eve.localhost run-tests --skip-before-tests --module eve_agent.test
 They use the seeded demo users (`<name>@eve-demo.local`) and skip when those are missing.
 """
 
+import json
 import re
 import unittest
 from contextlib import ExitStack
@@ -20,6 +21,7 @@ from frappe.utils.nestedset import get_root_of
 
 from eve_agent.access import fanout, members
 from eve_agent.access.build import build_profile_graph, profile_graph_names, with_live_field_levels
+from eve_agent.access.guard import HIDDEN_SOURCE_TITLE, make_can_read
 from eve_agent.access.members import member_counts
 from eve_agent.access.profiles import (
 	CAPACITY_LOG_FLAG,
@@ -41,7 +43,11 @@ from eve_agent.access.profiles import (
 from eve_agent.access.reader import ProfileReader
 from eve_agent.access.resolve import hook_restricted, is_own_record, resolve_scope
 from eve_agent.access.scope import SPECIAL_DROP, SPECIAL_KEEP, AccessScope, filter_plan
-from eve_agent.falkor.importer.data_rows import FIELD_ALLOWLIST, STANDARD_FIELDS
+from eve_agent.api import chat
+from eve_agent.api.agent import DEFAULT_CHAT_ROLES
+from eve_agent.chat.common import QueryRun, result
+from eve_agent.chat.tools import TOOL_NEEDS, build_tools
+from eve_agent.falkor.importer.data_rows import FIELD_ALLOWLIST, STANDARD_FIELDS, parse_lines
 from eve_agent.falkor.importer.incremental import IncrementalSummary, make_key
 from eve_agent.install import after_migrate
 from eve_agent.sync import record_reader
@@ -1229,3 +1235,243 @@ class ProfileFanOutTests(FrappeTestCase):
 				run_schema_sync()  # queueing the rebuilds never turns the sync into a failure
 			self.assertEqual(written.call_args.args[1]["last_sync_status"], "Success")
 			log_error.assert_called_once()
+
+
+class ChatRequestTests(FrappeTestCase):
+	"""The chat endpoints as priya (Sales Manager + Sales User: a Chat Role, no Sales Invoice; ruling R18),
+	and as a user whose only role is a Chat Role without DocPerms (ruling R6).
+
+	No build reaches the running worker (ruling R3): frappe.enqueue is patched and the tests run builds. Builds
+	commit, so tearDown deletes every profile, user, role, Error Log and Settings change a test made.
+	"""
+
+	BUILD_JOB = "eve_agent.access.profiles.run_profile_build"
+	CHAT_ROLE = "Eve Test Chat Role"
+	NO_ACCESS_USER = "eve-test-no-access@eve-demo.local"
+	QUESTION = "Who are our top customers?"
+
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		cls.started = now_datetime()
+		cls.settings = frappe.get_single("Eve Agent Settings")
+		try:
+			get_graph_client(cls.settings).ping()
+		except Exception:
+			raise unittest.SkipTest("FalkorDB is not reachable") from None
+		if not cls.settings.enable_chat:
+			raise unittest.SkipTest("Enable Chat is off in Eve Agent Settings")
+		cls.priya = seeded_user("priya")
+		cls.scope = resolve_scope(cls.priya, data_plan())
+		if frappe.db.exists(PROFILE_DOCTYPE, cls.scope.key):
+			raise unittest.SkipTest("an access profile for priya already exists on this site")
+		cls.invoice = frappe.db.get_value("Sales Invoice", {"docstatus": 1})
+		cls.order = frappe.db.get_value("Sales Order", {"docstatus": 1})
+		if not (cls.invoice and cls.order):
+			raise unittest.SkipTest("no submitted Sales Invoice or Sales Order on this site")
+
+	def setUp(self):
+		self.keys = {self.scope.key}
+		self.saved = {}
+		self.records = []  # (doctype, name) made by a test; tearDown deletes them before it commits
+		self.enqueue = patch("frappe.enqueue").start()
+		patch("frappe.publish_realtime").start()
+		self.addCleanup(patch.stopall)
+		self.clear_flags()
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+		for doctype, name in reversed(self.records):
+			frappe.delete_doc(doctype, name, force=True, ignore_permissions=True, delete_permanently=True)
+		deleted = [*self.records, *((PROFILE_DOCTYPE, key) for key in self.keys)]
+		for key in self.keys:
+			delete_profile(key)
+		for doctype, name in (("User", self.NO_ACCESS_USER), ("Role", self.CHAT_ROLE)):
+			if frappe.db.exists(doctype, name):
+				frappe.delete_doc(doctype, name, force=True, ignore_permissions=True, delete_permanently=True)
+				deleted.append((doctype, name))
+		deleted.append(("Notification Settings", self.NO_ACCESS_USER))  # deleted with the user
+		if self.saved:
+			frappe.db.set_single_value("Eve Agent Settings", self.saved)
+		since = {"creation": (">=", self.started)}
+		frappe.db.delete("Error Log", {"method": HIDDEN_SOURCE_TITLE, **since})
+		for doctype, name in deleted:  # delete_doc's activity feed entries
+			frappe.db.delete("Comment", {"comment_type": "Deleted", "subject": f"{doctype} {name}", **since})
+		# The test user's "Shared" comment (it is shared with itself) and its Notification Settings' copies.
+		frappe.db.delete("Comment", {"reference_name": self.NO_ACCESS_USER, **since})
+		frappe.db.delete("Deleted Document", {"deleted_name": self.NO_ACCESS_USER, **since})
+		frappe.db.commit()
+		self.clear_flags()
+		frappe.cache.delete(_key(FLAG_KEY))  # set by queue_keys (the test user), whose drain job never ran
+
+	def clear_flags(self):
+		for key in self.keys:
+			frappe.cache.delete(build_flag(key))
+		frappe.cache.delete_value([members.CACHE_KEY, members.UNAVAILABLE_KEY])
+
+	def set_setting(self, field, value):
+		self.saved.setdefault(field, frappe.db.get_single_value("Eve Agent Settings", field))
+		frappe.db.set_single_value("Eve Agent Settings", field, value)
+
+	def builds(self) -> int:
+		return sum(c.args[0] == self.BUILD_JOB for c in self.enqueue.call_args_list)
+
+	def status(self, key):
+		return frappe.db.get_value(PROFILE_DOCTYPE, key, "status")
+
+	def stream(self, user) -> list[dict]:
+		"""Ask the stream endpoint one question as `user`; the events it sends back."""
+		messages = [{"role": "user", "parts": [{"type": "text", "text": self.QUESTION}]}]
+		with self.set_user(user):
+			body = chat.stream(id="eve-test", messages=messages).get_data(as_text=True)
+		return [json.loads(chunk.removeprefix("data: ")) for chunk in body.split("\n\n") if chunk]
+
+	def context(self, user):
+		with self.set_user(user):
+			return chat.build_context(chat.get_settings(), question=self.QUESTION)
+
+	def build(self, user, cypher=None, **params) -> str:
+		"""`user` asks, then the build job runs here; returns the Ready graph. With `cypher`, the build writes
+		only that to the graph (a fake build), else it is a real one."""
+		with self.set_user(user):
+			scope = chat.resolve_chat_graph(chat.get_settings(), user)[0]
+		self.keys.add(scope.key)
+
+		def fake_build(settings, scope, graph_name):
+			get_graph_client(settings, graph_name).query(cypher, params)
+			return "built"
+
+		with ExitStack() as stack:
+			if cypher:
+				stack.enter_context(patch("eve_agent.access.profiles.build_profile_graph", fake_build))
+			run_profile_build(scope.key)
+		profile = frappe.db.get_value(PROFILE_DOCTYPE, scope.key, ["status", "active_graph"], as_dict=True)
+		self.assertEqual(profile.status, "Ready")
+		return profile.active_graph
+
+	def hidden_logs(self) -> list[dict]:
+		filters = {"method": HIDDEN_SOURCE_TITLE, "creation": (">=", self.started)}
+		return [json.loads(error) for error in frappe.get_all("Error Log", filters, pluck="error")]
+
+	def test_new_profile_streams_preparing_message(self):
+		with patch("eve_agent.api.chat.build_tools") as tools, patch("litellm.completion") as completion:
+			events = self.stream(self.priya)
+		self.assertEqual(events, [{"type": "text-delta", "delta": PREPARING_MESSAGE}, {"type": "finish"}])
+		tools.assert_not_called()  # never answered from another graph meanwhile
+		completion.assert_not_called()
+		self.assertEqual(self.status(self.scope.key), "Pending")
+		self.assertEqual(self.builds(), 1)
+
+	def test_ready_profile_uses_profile_graph(self):
+		graph = self.build(self.priya)
+		self.assertNotEqual(graph, active_data_graph(self.settings))
+		ctx = self.context(self.priya)
+		self.assertEqual(ctx.data.name, graph)
+		self.assertEqual(ctx.config.data_graph, graph)  # the Cypher log records the profile graph
+		self.assertEqual(ctx.scope.key, self.scope.key)
+		self.assertTrue(ctx.can_read and ctx.on_hidden_source)
+		# The turn runs on that context: the prompt lists priya's DocTypes, and Sales Invoice is not one.
+		reply = iter([{"type": "text-delta", "delta": "Here they are."}])
+		turn = patch("eve_agent.api.chat.run_turn", return_value=reply)
+		with turn as run_turn, patch("eve_agent.api.chat.save_turn"):
+			events = self.stream(self.priya)
+		self.assertEqual(events, [{"type": "text-delta", "delta": "Here they are."}, {"type": "finish"}])
+		visible = re.search(r"Visible DocTypes: (.*?)\. If a question", run_turn.call_args.kwargs["system"])
+		self.assertIn("Sales Order", visible.group(1).split(", "))
+		self.assertNotIn("Sales Invoice", visible.group(1).split(", "))
+
+	def test_admin_uses_main_graph(self):
+		self.assertEqual(frappe.session.user, "Administrator")
+		before = frappe.db.count(PROFILE_DOCTYPE)
+		ctx = chat.build_context(chat.get_settings())
+		self.assertEqual(ctx.data.name, active_data_graph(frappe.get_single("Eve Agent Settings")))
+		self.assertTrue(ctx.scope.full_access)
+		self.assertEqual(frappe.db.count(PROFILE_DOCTYPE), before)
+		self.assertEqual(self.builds(), 0)
+
+	def test_failed_profile_answers_failed_message(self):
+		with self.set_user(self.priya):
+			chat.resolve_chat_graph(chat.get_settings(), self.priya)
+		down = patch("eve_agent.access.profiles.build_profile_graph", side_effect=RuntimeError("down"))
+		with down, patch("frappe.log_error"):
+			run_profile_build(self.scope.key)
+		self.assertEqual(self.status(self.scope.key), "Failed")
+		with patch("eve_agent.api.chat.build_tools") as tools:
+			events = self.stream(self.priya)
+		self.assertEqual(events, [{"type": "text-delta", "delta": FAILED_MESSAGE}, {"type": "finish"}])
+		tools.assert_not_called()
+		self.assertEqual(self.builds(), 2)  # the question retried the build
+
+	def test_locate_hides_invoices_for_sales_user(self):
+		with self.set_user(self.priya):
+			self.assertEqual(chat.locate([self.order]), {})  # not Ready: no other graph is asked
+		# A profile graph with a bug: it holds an invoice priya may not read, next to an order she may.
+		cypher = (
+			"CREATE (:Record:`Sales Invoice` {name: $invoice, doctype: 'Sales Invoice'}), "
+			"(:Record:`Sales Order` {name: $order, doctype: 'Sales Order'})"
+		)
+		self.build(self.priya, cypher, invoice=self.invoice, order=self.order)
+		with self.set_user(self.priya):
+			self.assertEqual(chat.locate([self.invoice]), {})
+			self.assertEqual(chat.locate(json.dumps([self.invoice, self.order])), {self.order: "Sales Order"})
+		self.assertEqual(
+			self.hidden_logs()[0],
+			{"doctype": "Sales Invoice", "name": self.invoice, "tool": "locate", "user": self.priya},
+		)
+
+	def test_guard_logs_hidden_source(self):
+		self.build(self.priya, "CREATE (:EveTest)")
+		ctx = self.context(self.priya)
+		ctx.current_tool = "top_customers"
+		rows = [{"customer": "A", "invoices": [self.invoice]}, {"customer": "B", "orders": [self.order]}]
+		run = QueryRun(title="Top customers", cypher="", params={}, rows=rows, ms=0)
+		forged = {"doctype": "Sales Invoice", "name": self.invoice}
+		order = {"doctype": "Sales Order", "name": self.order}
+		with self.set_user(self.priya):
+			out = result(ctx, [run], [forged, order])
+		self.assertEqual(out["sources"], [order])
+		self.assertEqual(out["queries"][0]["rows"], [rows[1]])
+		user = {"user": self.priya}
+		self.assertEqual(self.hidden_logs(), [{**forged, "tool": "top_customers", **user}])
+
+	def test_can_read_checks_rows_and_comments_through_their_document(self):
+		can_read = make_can_read(self.priya)
+		order_item = frappe.db.get_value("Sales Order Item", {"parent": self.order})
+		invoice_item = frappe.db.get_value("Sales Invoice Item", {"parent": self.invoice})
+		self.assertTrue(can_read("Sales Order", self.order))
+		self.assertTrue(can_read("Sales Order Item", order_item))
+		self.assertFalse(can_read("Sales Invoice", self.invoice))
+		self.assertFalse(can_read("Sales Invoice Item", invoice_item))
+		# Frappe gives priya no read on Comment itself; a comment counts as readable with its document.
+		on_order = add_comment("Sales Order", self.order, self.records)
+		self.assertFalse(frappe.has_permission("Comment", "read", doc=on_order, user=self.priya))
+		self.assertTrue(can_read("Comment", on_order))
+		self.assertFalse(can_read("Comment", add_comment("Sales Invoice", self.invoice, self.records)))
+		self.assertTrue(can_read("User", "Administrator"))  # a User always passes (spec section 2)
+		self.assertFalse(can_read("Sales Order", "eve-test-no-such-order"))  # e.g. deleted, not drained yet
+		self.assertFalse(can_read("", self.order))
+		with patch("frappe.has_permission") as has_permission:
+			self.assertTrue(can_read("Sales Order", self.order))  # cached for the turn
+		has_permission.assert_not_called()
+
+	def test_user_with_no_readable_doctypes(self):
+		frappe.get_doc({"doctype": "Role", "role_name": self.CHAT_ROLE, "desk_access": 1}).insert(
+			ignore_permissions=True
+		)
+		roles = parse_lines(frappe.db.get_single_value("Eve Agent Settings", "chat_roles"))
+		self.set_setting("chat_roles", "\n".join([*(roles or DEFAULT_CHAT_ROLES), self.CHAT_ROLE]))
+		user = {"doctype": "User", "email": self.NO_ACCESS_USER, "first_name": "Eve Test"}
+		user.update(send_welcome_email=0, roles=[{"role": self.CHAT_ROLE}])
+		frappe.get_doc(user).insert(ignore_permissions=True)
+		scope = resolve_scope(self.NO_ACCESS_USER, data_plan())
+		if frappe.db.exists(PROFILE_DOCTYPE, scope.key):
+			self.skipTest("an access profile with no readable DocTypes already exists on this site")
+		self.assertFalse(scope.full_access)
+		needed = {doctype for groups in TOOL_NEEDS.values() for group in groups for doctype in group}
+		self.assertFalse(set(scope.parents) & needed)  # every desk user still reads e.g. Print Heading
+		graph = self.build(self.NO_ACCESS_USER)  # a real build; the first-build sweep keeps it (a chat user)
+		ctx = self.context(self.NO_ACCESS_USER)
+		self.assertEqual((ctx.data.name, ctx.scope.key), (graph, scope.key))
+		names = {tool.name for tool in build_tools(ctx)}
+		self.assertFalse(names & set(TOOL_NEEDS))
+		self.assertIn("find_entity", names)

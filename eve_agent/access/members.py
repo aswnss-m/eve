@@ -9,8 +9,9 @@ from collections import Counter
 import frappe
 
 from eve_agent.access.resolve import resolve_scope
+from eve_agent.access.scope import AccessScope
 from eve_agent.api.agent import DEFAULT_CHAT_ROLES
-from eve_agent.falkor.importer.data_rows import parse_lines
+from eve_agent.falkor.importer.data_rows import DataPlan, parse_lines
 from eve_agent.sync.data_sync import load_plan
 
 CACHE_KEY = "eve_agent:profile_members"
@@ -25,10 +26,16 @@ def chat_users(settings) -> list[str]:
 	return [user for user in users if roles & set(frappe.get_roles(user))]
 
 
+def member_scope(settings, user: str, plan: DataPlan | None = None) -> AccessScope:
+	"""`user`'s scope, resolved over load_plan(settings). The chat request resolves through here too, so a
+	member asks for the very profile they are counted in, and a first build never sweeps it as unmapped."""
+	return resolve_scope(user, load_plan(settings) if plan is None else plan)
+
+
 def member_counts(settings) -> Counter:
 	"""Profile key -> how many chat users map to it, computed now and cached for later readers."""
 	plan = load_plan(settings)
-	counts = Counter(resolve_scope(user, plan).key for user in chat_users(settings))
+	counts = Counter(member_scope(settings, user, plan).key for user in chat_users(settings))
 	frappe.cache.set_value(CACHE_KEY, dict(counts), expires_in_sec=CACHE_SECONDS)
 	frappe.cache.delete_value(UNAVAILABLE_KEY)
 	return counts
