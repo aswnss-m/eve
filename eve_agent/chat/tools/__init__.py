@@ -5,6 +5,7 @@ from eve_agent.chat.tools.brain import brain_tools
 from eve_agent.chat.tools.charts import chart_tools
 from eve_agent.chat.tools.entities import entity_tools
 from eve_agent.chat.tools.sales import sales_tools
+from eve_agent.chat.tools.trends import trend_tools
 from eve_agent.chat.tools.utility import utility_tools
 
 _CUSTOMER_SALES = (frozenset({"Customer"}), frozenset({"Sales Invoice", "Sales Order"}))
@@ -19,6 +20,8 @@ TOOL_NEEDS: dict[str, tuple[frozenset[str], ...]] = {
 	"also_bought": _ITEM_SALES,
 	"item_profile": (frozenset({"Item"}),),
 	"top_suppliers": (frozenset({"Supplier"}), frozenset({"Purchase Invoice", "Purchase Order"})),
+	"sales_trend": _CUSTOMER_SALES,
+	"purchase_trend": (frozenset({"Supplier"}), frozenset({"Purchase Invoice", "Purchase Order"})),
 	"supplier_risk": (
 		frozenset({"Item"}),
 		frozenset({"Supplier"}),
@@ -47,6 +50,7 @@ def build_tools(ctx: ToolContext) -> list[Tool]:
 	tools = [
 		*entity_tools(ctx),
 		*sales_tools(ctx),
+		*trend_tools(ctx),
 		*brain_tools(ctx),
 		*utility_tools(ctx),
 		*action_tools(ctx),

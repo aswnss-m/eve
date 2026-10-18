@@ -5,8 +5,11 @@ import unittest
 from datetime import date
 
 from eve_agent.chat.common import QueryRun, result
+from eve_agent.chat.prompt import system_prompt
+from eve_agent.chat.tools import build_tools
 from eve_agent.chat.tools.charts import ShowChartArgs, build_chart, chart_tools
-from eve_agent.tests.test_chat import make_ctx
+from eve_agent.chat.tools.sales import PURCHASE_ORDERS_NOTE, SALES_ORDERS_NOTE
+from eve_agent.tests.test_chat import make_ctx, make_scope
 
 TODAY = date(2026, 10, 18)
 MONTHS = [
@@ -118,7 +121,8 @@ class ShowChartTests(unittest.TestCase):
 	def test_rows_dropped_by_the_safety_net_are_not_charted(self):
 		ctx = make_ctx()
 		ctx.can_read = lambda doctype, name: name != "Apex"
-		rows = [{"customer": n, "revenue": r} for n, r in (("Apex", 9), ("Titan", 7), ("Vertex", 5), ("Orion", 4))]
+		ranking = (("Apex", 9), ("Titan", 7), ("Vertex", 5), ("Orion", 4))
+		rows = [{"customer": n, "revenue": r} for n, r in ranking]
 		sources = [{"doctype": "Customer", "name": r["customer"]} for r in rows]
 		result(ctx, [run_of(rows, "Top customers")], sources)
 		chart = show_chart(ctx, query="q1", type="bar", x="customer", y=["revenue"])["chart"]
@@ -132,6 +136,83 @@ class ShowChartTests(unittest.TestCase):
 		self.assertEqual(out["queries"], [])
 		self.assertEqual(out["sources"], [])
 		self.assertIn("as_of", out)
+
+
+CHARTS_RULE = (
+	"Charts: after a data tool returns a time series, a ranking or a breakdown with at least 3 values, "
+	"call show_chart with that query's id (for example q1), the label column and the value column(s): "
+	"line for trends, bar for rankings, donut for parts of a whole. One chart per answer unless asked. "
+	"Still write the one-line summary. Never put numbers in show_chart. "
+	"If the user asks for just the table, don't chart."
+)
+SALES_VISIBLE = {"Customer": (0,), "Sales Invoice": (0,), "Sales Order": (0,), "Item": (0,)}
+ORDERS_ONLY = {"Customer": (0,), "Sales Order": (0,), "Item": (0,), "Supplier": (0,), "Purchase Order": (0,)}
+
+
+class TrendTests(unittest.TestCase):
+	def ctx(self, readable=None):
+		ctx = make_ctx()
+		if readable is not None:
+			ctx.scope = make_scope(readable)
+		return ctx
+
+	def run_trend(self, ctx, name, **kwargs):
+		tool = next(t for t in build_tools(ctx) if t.name == name)
+		return tool.run(tool.params(**kwargs))
+
+	def cypher(self, ctx):
+		return ctx.data.calls[-1][1]
+
+	def test_sales_trend_reads_invoices_by_month(self):
+		ctx = self.ctx()
+		out = self.run_trend(ctx, "sales_trend", date_from="2026-01-01", date_to="2026-12-31")
+		self.assertIn("`Sales Invoice`", self.cypher(ctx))
+		self.assertIn("substring(d.posting_date, 0, 7)", self.cypher(ctx))
+		self.assertNotIn("note", out)
+		self.assertEqual(ctx.data.calls[-1][2]["date_from"], "2026-01-01")
+
+	def test_sales_trend_falls_back_to_orders(self):
+		ctx = self.ctx(ORDERS_ONLY)
+		out = self.run_trend(ctx, "sales_trend")
+		self.assertIn("`Sales Order`", self.cypher(ctx))
+		self.assertNotIn("Sales Invoice", self.cypher(ctx))
+		self.assertEqual(out["note"], SALES_ORDERS_NOTE)
+
+	def test_total_by_item_group_feeds_a_donut(self):
+		ctx = self.ctx()
+		self.run_trend(ctx, "sales_trend", interval="total", group_by="item_group")
+		cypher = self.cypher(ctx)
+		self.assertIn("AS group", cypher)
+		self.assertIn("i.item_group", cypher)
+		self.assertNotIn("substring(d.posting_date, 0, 7)", cypher)
+
+	def test_quarters_are_labelled(self):
+		ctx = self.ctx()
+		self.run_trend(ctx, "sales_trend", interval="quarter")
+		self.assertIn("'-Q'", self.cypher(ctx))
+
+	def test_purchase_trend_falls_back_to_purchase_orders(self):
+		ctx = self.ctx(ORDERS_ONLY)
+		out = self.run_trend(ctx, "purchase_trend")
+		self.assertIn("`Purchase Order`", self.cypher(ctx))
+		self.assertNotIn("Purchase Invoice", self.cypher(ctx))
+		self.assertEqual(out["note"], PURCHASE_ORDERS_NOTE)
+
+	def test_empty_period_returns_no_rows(self):
+		ctx = self.ctx()
+		out = self.run_trend(ctx, "sales_trend", date_from="2030-01-01", date_to="2030-12-31")
+		self.assertEqual(out["queries"][0]["rows"], [])
+		self.assertEqual(out["queries"][0]["id"], "q1")
+
+	def test_prompt_has_charts_rule(self):
+		ctx = self.ctx()
+		self.assertIn(CHARTS_RULE, system_prompt(ctx.config, ctx.user, ""))
+
+	def test_trend_tools_gated(self):
+		ctx = self.ctx({"Customer": (0,), "Sales Order": (0,)})
+		names = {t.name for t in build_tools(ctx)}
+		self.assertIn("sales_trend", names)
+		self.assertNotIn("purchase_trend", names)
 
 
 if __name__ == "__main__":

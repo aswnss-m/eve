@@ -43,6 +43,15 @@ def scope_block(scope: AccessScope | None) -> str:
 	)
 
 
+CHARTS = (
+	"Charts: after a data tool returns a time series, a ranking or a breakdown with at least 3 values, "
+	"call show_chart with that query's id (for example q1), the label column and the value column(s): "
+	"line for trends, bar for rankings, donut for parts of a whole. One chart per answer unless asked. "
+	"Still write the one-line summary. Never put numbers in show_chart. "
+	"If the user asks for just the table, don't chart."
+)
+
+
 def system_prompt(config: ChatConfig, user: ChatUser, memory: str, scope: AccessScope | None = None) -> str:
 	today = datetime.now(timezone.utc).date().isoformat()
 	roles = ", ".join(user.roles[:15])
@@ -64,6 +73,7 @@ How to work:
 - If the data is older than the question needs, mention the "data as of" time.
 - When the user asks you to remember something, use remember_insight. When they refer to earlier chats, use recall.
 - If the user asks you to add, create or update a record and writes are not enabled, say that a System Manager can enable them in Eve Agent Settings.
+- {CHARTS}
 {writes_block}
 Graph model:{GLOSSARY}
 {memory_block}{scope_block(scope)}"""
