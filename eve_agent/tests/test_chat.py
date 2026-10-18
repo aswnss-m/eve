@@ -623,16 +623,46 @@ class FallbackTests(unittest.TestCase):
 		for title, cypher, _ in data.calls:
 			self.assertNotIn("Sales Invoice", cypher, title)
 			self.assertNotIn("Purchase Invoice", cypher, title)
+			if title != "Item, suppliers, stock and BOMs":  # Reads SUPPLIES and STOCKED_IN, not orders.
+				self.assertTrue("Sales Order" in cypher or "Purchase Order" in cypher, title)
 
 	def test_purchase_fallback_note(self):
 		out = self.call(self.no_invoices(), "top_suppliers", by="invoices")
 		self.assertEqual(out["note"], PURCHASE_ORDERS_NOTE)
 
-	def test_supplier_risk_revenue_is_zero_without_sales_access(self):
+	def test_unknown_figures_are_null_not_zero(self):
+		data = FakeGraph()
+		ctx = self.no_invoices(data)
+		self.call(ctx, "top_customers", by="revenue")
+		from eve_agent.chat.tools.entities import CUSTOMER_DOCS_ORDERS, CUSTOMER_SUMMARY_ORDERS
+
+		self.assertIn("null AS outstanding", data.calls[0][1])
+		self.assertNotIn("0 AS outstanding", data.calls[0][1])
+		self.assertIn("null AS outstanding", CUSTOMER_SUMMARY_ORDERS)
+		self.assertIn("null AS paid", CUSTOMER_DOCS_ORDERS)
+		self.assertNotIn(" 0 AS", CUSTOMER_DOCS_ORDERS + CUSTOMER_SUMMARY_ORDERS)
+
+	def test_supplier_risk_without_sales_access_is_null(self):
 		data = FakeGraph()
 		readable = {"Item": (0,), "Supplier": (0,), "Purchase Order": (0,)}
-		self.call(self.ctx_for(readable, data), "supplier_risk")
-		self.assertIn("0 AS revenue_at_risk", data.calls[0][1])
+		out = self.call(self.ctx_for(readable, data), "supplier_risk")
+		cypher = data.calls[0][1]
+		self.assertIn("null AS revenue_at_risk", cypher)
+		self.assertIn("null AS customers", cypher)
+		self.assertIn("Revenue at risk isn't available", out["note"])
+
+	def test_profiles_without_any_sales_access_are_null_with_honest_note(self):
+		data = self.RowGraph()
+		ctx = self.ctx_for({"Customer": (0,), "Item": (0,)}, data)
+		out = self.call(ctx, "customer_profile", customer="Acme")
+		self.assertNotIn("Based on submitted sales orders", out["note"])
+		self.assertIn("Sales figures aren't available", out["note"])
+		cypher = data.calls[0][1]
+		self.assertIn("null AS revenue", cypher)
+		self.assertNotIn("Sales Order`", cypher)
+		out = self.call(ctx, "item_profile", item="I-1")
+		self.assertIn("Sales figures aren't available", out["note"])
+		self.assertEqual(len(out["queries"]), 1)
 
 	def test_invoice_scope_unchanged(self):
 		data = FakeGraph()

@@ -11,7 +11,9 @@ from eve_agent.chat.common import Tool, ToolContext, iso_days_ago, refs, result,
 
 DATE_PATTERN = r"^\d{4}-\d{2}-\d{2}$"
 
-SALES_ORDERS_NOTE = "Based on submitted sales orders: invoices need access to Sales Invoice, which you don't have."
+SALES_ORDERS_NOTE = (
+	"Based on submitted sales orders: invoices need access to Sales Invoice, which you don't have."
+)
 PURCHASE_ORDERS_NOTE = (
 	"Based on submitted purchase orders: purchase invoices need access to Purchase Invoice, which you don't have."
 )
@@ -19,7 +21,10 @@ OUTSTANDING_NOTE = (
 	"Outstanding amounts need access to Sales Invoice, which you don't have; ranked by order value instead."
 )
 NO_REVENUE_NOTE = (
-	"Revenue at risk is 0 because it needs access to Sales Invoice or Sales Order, which you don't have."
+	"Revenue at risk isn't available: it needs access to Sales Invoice or Sales Order, which you don't have."
+)
+NO_SALES_NOTE = (
+	"Sales figures aren't available: they need access to Sales Invoice or Sales Order, which you don't have."
 )
 
 
@@ -96,7 +101,7 @@ WITH c, sum(so.base_grand_total) AS revenue, count(so) AS orders, max(so.transac
 OPTIONAL MATCH (c)<-[:FOR_CUSTOMER]-(so2:`Sales Order`)-[:CONTAINS]->(i:Item) WHERE so2.docstatus = 1
 WITH c, revenue, orders, last_invoice, count(DISTINCT i) AS distinct_items
 RETURN c.name AS customer, c.customer_group AS customer_group, c.territory AS territory,
-       revenue, orders, 0 AS outstanding, last_invoice, distinct_items
+       revenue, orders, null AS outstanding, last_invoice, distinct_items
 ORDER BY {order_by} DESC LIMIT $limit"""
 
 
@@ -158,7 +163,7 @@ def single_source_items_cypher(purchase_invoices: bool, revenue: str) -> str:
 			+ "       sum(coalesce(k.amount, 0)) AS revenue_at_risk, count(DISTINCT c) AS customers\n"
 		)
 	else:
-		tail = columns + "       0 AS revenue_at_risk, 0 AS customers\n"
+		tail = columns + "       null AS revenue_at_risk, null AS customers\n"
 	return "\n" + head + tail + "ORDER BY revenue_at_risk DESC LIMIT $limit"
 
 
