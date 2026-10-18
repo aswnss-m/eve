@@ -60,13 +60,21 @@ The agent has no other copy of the ERP data. Without FalkorDB it cannot answer a
 
 ```bash
 docker run -d --name falkordb --restart unless-stopped \
-  -p 6500:6379 -p 4000:3000 \
+  -p 127.0.0.1:6500:6379 -p 127.0.0.1:4000:3000 \
+  -e FALKORDB_ARGS="MAX_QUEUED_QUERIES 100 TIMEOUT 10000 RESULTSET_SIZE 10000 CACHE_SIZE 128" \
+  -e REDIS_ARGS="--appendonly yes --appendfsync everysec" \
   -v falkordb_data:/var/lib/falkordb/data \
-  falkordb/falkordb:latest
+  falkordb/falkordb:v4.22.1
 ```
+
+Or `docker compose up -d` in this app's folder, which runs the same settings from [docker-compose.yml](docker-compose.yml).
 
 - **Port 6500** is the FalkorDB server (Redis protocol). It's mapped away from 6379 so it can't clash with a local Redis.
 - **Port 4000** is the FalkorDB Browser UI.
+- Both ports are bound to `127.0.0.1`. The server has no password, so don't publish them on all interfaces. If the bench runs on another machine, add `--requirepass <secret>` to `REDIS_ARGS` and put `redis://:<secret>@host:6500` in Eve Agent Settings.
+- `FALKORDB_ARGS` replaces the image default, which kills every read query after 1 second (`TIMEOUT 1000`). `TIMEOUT` only applies to read-only queries, so syncs are never cut off. Don't set `TIMEOUT_DEFAULT` or `TIMEOUT_MAX` instead: they also time out writes and roll them back.
+- `--appendonly yes` keeps the memory graph (chat history, saved insights), which, unlike the ERP graphs, cannot be rebuilt by a resync. To turn it on for a server that already has graphs, run `redis-cli -p 6500 CONFIG SET appendonly yes` and wait for `aof_rewrite_in_progress:0` in `INFO persistence` before restarting with the new arguments.
+- The image is pinned so a reinstall doesn't move to another major version unplanned. FalkorDB 6 is a new engine (tagged `6.0.x`; `edge` already points at it).
 - The volume keeps the graphs across container restarts. Without it they are lost, but a resync rebuilds them.
 - **No Docker?** Create a free instance at [app.falkordb.cloud](https://app.falkordb.cloud). Host and port are on its **Connectivity** tab (Endpoint), user and password under **Instance Details → Parameter**. Enter them in the Host fields of step 3. The instance ID is only a console label; clients don't use it.
 

@@ -2,10 +2,20 @@
 #   docker compose up -d
 services:
   falkordb:
-    image: falkordb/falkordb:v4.22.0
+    image: falkordb/falkordb:v4.22.1
     ports:
-      - "6500:6379" # Redis protocol (Eve Agent Settings: redis://127.0.0.1:6500)
-      - "4000:3000" # FalkorDB Browser
+      # Localhost only: the server has no password unless REDIS_ARGS sets one.
+      - "127.0.0.1:6500:6379" # Redis protocol (Eve Agent Settings: redis://127.0.0.1:6500)
+      - "127.0.0.1:4000:3000" # FalkorDB Browser
+    environment:
+      # Replaces the image default (MAX_QUEUED_QUERIES 25 TIMEOUT 1000 RESULTSET_SIZE 10000).
+      # TIMEOUT only applies to read-only queries: the agent's reads get 10 s, under the chat's
+      # 15 s socket timeout, and syncs are never cut off. Leave TIMEOUT_DEFAULT / TIMEOUT_MAX unset:
+      # they also time out writes and roll them back.
+      FALKORDB_ARGS: "MAX_QUEUED_QUERIES 100 TIMEOUT 10000 RESULTSET_SIZE 10000 CACHE_SIZE 128"
+      # AOF, because the memory graph (chat history, saved insights) cannot be rebuilt from the ERP.
+      # For a password, add `--requirepass <secret>` and use redis://:<secret>@127.0.0.1:6500 in Settings.
+      REDIS_ARGS: "--appendonly yes --appendfsync everysec"
     volumes:
       - falkordb_data:/var/lib/falkordb/data
     restart: unless-stopped
