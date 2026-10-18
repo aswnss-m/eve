@@ -23,7 +23,13 @@ from eve_agent.chat.memory import entity_refs, memory_context, save_turn
 from eve_agent.chat.prompt import system_prompt
 from eve_agent.chat.tools import TOOL_NEEDS, build_tools
 from eve_agent.chat.tools.entities import fulltext_query
-from eve_agent.chat.tools.sales import TopCustomersArgs
+from eve_agent.chat.tools.sales import (
+	OUTSTANDING_NOTE,
+	PURCHASE_ORDERS_NOTE,
+	SALES_ORDERS_NOTE,
+	TopCustomersArgs,
+	top_customers_cypher,
+)
 from eve_agent.falkor.query.readonly import WriteQueryError, assert_read_only
 
 EXPECTED_TOOLS = {
@@ -560,6 +566,84 @@ class ScopeTests(unittest.TestCase):
 		summary = memory_context(ctx)
 		self.assertIn("Customer Acme (asked 1x)", summary)
 		self.assertNotIn("SI-1", summary)
+
+
+class FallbackTests(unittest.TestCase):
+	"""Users who cannot read invoices get order-based answers and a note saying so."""
+
+	class RowGraph(FakeGraph):
+		def ro(self, title, cypher, params=None):
+			run = super().ro(title, cypher, params)
+			if title in ("Customer summary", "Item, suppliers, stock and BOMs"):
+				run.rows = [{"customer": "Acme", "item": "I-1"}]
+			return run
+
+	def ctx_for(self, readable, data=None):
+		ctx = make_ctx(data)
+		ctx.scope = make_scope(readable)
+		return ctx
+
+	def no_invoices(self, data=None):
+		readable = {"Customer": (0,), "Item": (0,), "Supplier": (0,), "Sales Order": (0,), "Purchase Order": (0,)}
+		return self.ctx_for(readable, data)
+
+	def call(self, ctx, name, **args):
+		tool = next(t for t in build_tools(ctx) if t.name == name)
+		return tool.run(tool.params.model_validate(args))
+
+	def test_top_customers_falls_back_to_orders(self):
+		data = FakeGraph()
+		out = self.call(self.no_invoices(data), "top_customers", by="revenue")
+		cypher = data.calls[0][1]
+		self.assertIn("`Sales Order`", cypher)
+		self.assertNotIn("`Sales Invoice`", cypher)
+		self.assertEqual(out["note"], SALES_ORDERS_NOTE)
+
+	def test_outstanding_ranking_falls_back_with_note(self):
+		out = self.call(self.no_invoices(), "top_customers", by="outstanding")
+		self.assertEqual(out["note"], OUTSTANDING_NOTE)
+
+	def test_every_fallback_avoids_invoices(self):
+		data = self.RowGraph()
+		ctx = self.no_invoices(data)
+		calls = {
+			"top_customers": {},
+			"dormant_customers": {},
+			"customer_profile": {"customer": "Acme"},
+			"top_selling_items": {},
+			"item_profile": {"item": "I-1"},
+			"also_bought": {"item": "I-1"},
+			"top_suppliers": {},
+			"supplier_risk": {},
+		}
+		for name, args in calls.items():
+			out = self.call(ctx, name, **args)
+			self.assertTrue(out["note"], name)
+		self.assertTrue(data.calls)
+		for title, cypher, _ in data.calls:
+			self.assertNotIn("Sales Invoice", cypher, title)
+			self.assertNotIn("Purchase Invoice", cypher, title)
+
+	def test_purchase_fallback_note(self):
+		out = self.call(self.no_invoices(), "top_suppliers", by="invoices")
+		self.assertEqual(out["note"], PURCHASE_ORDERS_NOTE)
+
+	def test_supplier_risk_revenue_is_zero_without_sales_access(self):
+		data = FakeGraph()
+		readable = {"Item": (0,), "Supplier": (0,), "Purchase Order": (0,)}
+		self.call(self.ctx_for(readable, data), "supplier_risk")
+		self.assertIn("0 AS revenue_at_risk", data.calls[0][1])
+
+	def test_invoice_scope_unchanged(self):
+		data = FakeGraph()
+		out = self.call(make_ctx(data), "top_customers", by="revenue")
+		self.assertEqual(data.calls[0][1], top_customers_cypher("revenue"))
+		self.assertNotIn("note", out)
+		readable = {"Customer": (0,), "Item": (0,), "Sales Invoice": (0,), "Sales Order": (0,)}
+		data = FakeGraph()
+		out = self.call(self.ctx_for(readable, data), "top_customers", by="revenue")
+		self.assertEqual(data.calls[0][1], top_customers_cypher("revenue"))
+		self.assertNotIn("note", out)
 
 
 class PlainTests(unittest.TestCase):
