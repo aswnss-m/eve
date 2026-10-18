@@ -5,13 +5,18 @@ They use the seeded demo users (`<name>@eve-demo.local`) and skip when those are
 """
 
 import unittest
+from dataclasses import replace
+from unittest.mock import patch
 
 import frappe
+import frappe.share
 from frappe.tests.utils import FrappeTestCase
+from frappe.utils import add_days, today
 from frappe.utils.nestedset import get_root_of
 
+from eve_agent.access.reader import ProfileReader
 from eve_agent.access.resolve import hook_restricted, is_own_record, resolve_scope
-from eve_agent.access.scope import SPECIAL_DROP, SPECIAL_KEEP
+from eve_agent.access.scope import SPECIAL_DROP, SPECIAL_KEEP, filter_plan
 from eve_agent.sync.data_sync import load_plan
 
 TEST_TERRITORY = "Eve Test South"
@@ -94,13 +99,69 @@ def grant_owner_only_read(user: str, doctype: str, records: list) -> None:
 	frappe.clear_cache(user=user)
 
 
+def add_comment(doctype: str, name: str, records: list) -> str:
+	"""A user comment (comment_type "Comment", the kind Eve syncs) on record `name`."""
+	comment = frappe.get_doc(
+		{
+			"doctype": "Comment",
+			"comment_type": "Comment",
+			"reference_doctype": doctype,
+			"reference_name": name,
+			"content": "Eve test comment",
+		}
+	).insert(ignore_permissions=True)
+	records.append(("Comment", comment.name))
+	return comment.name
+
+
+def add_test_territory_order(records: list) -> str:
+	"""A Customer in TEST_TERRITORY and a submitted Sales Order for it, with the latest order's first item."""
+	template = frappe.get_last_doc("Sales Order", filters={"docstatus": 1})
+	customer = frappe.get_doc(
+		{
+			"doctype": "Customer",
+			"customer_name": "Eve Test South Customer",
+			"customer_type": "Company",
+			"customer_group": frappe.db.get_value("Customer", template.customer, "customer_group"),
+			"territory": TEST_TERRITORY,
+		}
+	).insert(ignore_permissions=True)
+	records.append(("Customer", customer.name))
+	item = template.items[0]
+	row = {"item_code": item.item_code, "qty": 1, "rate": item.rate, "warehouse": item.warehouse}
+	order = frappe.get_doc(
+		{
+			"doctype": "Sales Order",
+			"customer": customer.name,
+			"company": template.company,
+			"territory": TEST_TERRITORY,
+			"transaction_date": today(),
+			"delivery_date": add_days(today(), 7),
+			"items": [row],
+		}
+	).insert(ignore_permissions=True)
+	records.append(("Sales Order", order.name))
+	order.submit()
+	return order.name
+
+
+def comments_on(doctype: str, name: str) -> set[str]:
+	"""Names of every Comment (of any type) on record `name`."""
+	filters = {"reference_doctype": doctype, "reference_name": name}
+	return set(frappe.get_all("Comment", filters, pluck="name"))
+
+
 def delete_records(records: list, users=(), doctypes=()) -> None:
-	"""Delete fixture records newest first, then drop the cached state of `users` and `doctypes`."""
+	"""Delete fixture records newest first (cancelling submitted ones), then drop the cached state of
+	`users` and `doctypes`."""
 	for doctype, name in reversed(records):
-		if frappe.get_meta(doctype).istable:  # e.g. a Has Role row
+		meta = frappe.get_meta(doctype)
+		if meta.istable:  # e.g. a Has Role row
 			frappe.db.delete(doctype, {"name": name})
-		else:
-			frappe.delete_doc(doctype, name, force=True, ignore_permissions=True)
+			continue
+		if meta.is_submittable and frappe.db.get_value(doctype, name, "docstatus") == 1:
+			frappe.get_doc(doctype, name).cancel()
+		frappe.delete_doc(doctype, name, force=True, ignore_permissions=True)
 	for doctype in doctypes:
 		frappe.clear_cache(doctype=doctype)  # deleting a Custom DocPerm does not clear the meta cache
 	for user in users:
@@ -197,3 +258,124 @@ class ResolveScopeTests(FrappeTestCase):
 		other = frappe.db.get_value("Employee", {"user_id": self.meera})
 		self.assertTrue(is_own_record("Employee", own, self.rahul))
 		self.assertFalse(is_own_record("Employee", other, self.rahul))
+
+
+class ProfileReaderTests(FrappeTestCase):
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		cls.rahul = seeded_user("rahul")
+		cls.ananya = seeded_user("ananya")
+		cls.meera = seeded_user("meera")
+		cls.plan = data_plan()
+
+	def setUp(self):
+		self.records = []
+		self.shares = []  # (doctype, name, user, the record's comments before sharing)
+
+	def tearDown(self):
+		for doctype, name, user, before in self.shares:
+			frappe.share.remove(doctype, name, user)
+			# Sharing and unsharing log "Shared" / "Unshared" comments on the record.
+			for comment in comments_on(doctype, name) - before:
+				frappe.delete_doc("Comment", comment, force=True, ignore_permissions=True)
+		delete_records(self.records, users=(self.rahul, self.ananya))
+
+	def share(self, doctype: str, name: str, user: str) -> None:
+		self.shares.append((doctype, name, user, comments_on(doctype, name)))
+		frappe.share.add(doctype, name, user)
+
+	def reader(self, user: str, doctype: str, **changes):
+		"""`user`'s ProfileReader (scope fields replaced by `changes`) and its plan for `doctype`."""
+		scope = replace(resolve_scope(user, self.plan), **changes)
+		plans = {p.name: p for p in filter_plan(self.plan, scope).parents}
+		return ProfileReader(scope), plans[doctype]
+
+	def names(self, user: str, doctype: str) -> set[str]:
+		reader, plan = self.reader(user, doctype)
+		return {r["name"] for r in reader.fetch_records(plan, 0)}
+
+	def test_reader_matches_get_list(self):
+		for doctype in ("Customer", "Quotation", "Sales Order", "Delivery Note"):
+			with self.subTest(doctype=doctype):
+				listed = set(frappe.get_list(doctype, user=self.rahul, pluck="name", limit=0))
+				self.assertTrue(listed)
+				self.assertEqual(self.names(self.rahul, doctype), listed)
+
+	def test_own_record_rule_hides_employee_linked_sales_persons(self):
+		names = self.names(self.rahul, "Sales Person")
+		self.assertTrue(names)  # e.g. the group "Sales Team"
+		self.assertFalse(any(frappe.get_all("Sales Person", {"name": ("in", names)}, pluck="employee")))
+		# Frappe also lists rahul's own Sales Person (employee = his Employee); the profile leaves it out.
+		listed = frappe.get_list("Sales Person", user=self.rahul, fields=["name", "employee"], limit=0)
+		self.assertTrue(any(r.employee for r in listed))
+		self.assertEqual(names, {r.name for r in listed if not r.employee})
+
+	def test_strict_mode_hides_empty_own_record_links_too(self):
+		reader, plan = self.reader(self.rahul, "Sales Person", strict=True)
+		self.assertEqual(reader.fetch_records(plan, 0), [])
+		# A scope resolved before strict mode was switched on: the stricter setting wins. (Patched rather
+		# than saved: saving System Settings clears site-wide caches and slows every later test.)
+		reader, plan = self.reader(self.rahul, "Sales Person")
+		self.assertFalse(reader.scope.strict)
+		real = frappe.get_system_settings
+
+		def strict_settings(key):
+			return 1 if key == "apply_strict_user_permissions" else real(key)
+
+		with patch("frappe.get_system_settings", strict_settings):
+			self.assertEqual(reader.fetch_records(plan, 0), [])
+
+	def test_unreadable_doctype_reads_nothing(self):
+		reader, _ = self.reader(self.rahul, "Sales Order")
+		invoices = next(p for p in self.plan.parents if p.name == "Sales Invoice")  # not in rahul's plan
+		self.assertEqual(reader.fetch_records(invoices, 0), [])
+		invoice = frappe.db.get_value("Sales Invoice", {})
+		self.assertEqual(reader.fetch_records_by_names(invoices, [invoice]), [])
+
+	def test_reader_does_not_depend_on_the_session_user(self):
+		reader, plan = self.reader(self.rahul, "Comment")
+		as_admin = sorted(reader.fetch_records(plan, 0), key=lambda row: row["name"])
+		with self.set_user(self.rahul):  # e.g. a profile build queued by rahul's chat request
+			as_rahul = sorted(reader.fetch_records(plan, 0), key=lambda row: row["name"])
+		self.assertTrue(as_admin)
+		self.assertEqual(as_rahul, as_admin)
+
+	def test_comments_follow_their_reference(self):
+		order = frappe.get_list("Sales Order", user=self.rahul, pluck="name", limit=1)[0]
+		visible = add_comment("Sales Order", order, self.records)
+		hidden = (
+			add_comment("Sales Invoice", frappe.db.get_value("Sales Invoice", {}), self.records),
+			# Frappe lists rahul's own Employee only, and the profile not even that one.
+			add_comment("Employee", frappe.db.get_value("Employee", {"user_id": self.meera}), self.records),
+		)
+		reader, plan = self.reader(self.rahul, "Comment")
+		rows = reader.fetch_records(plan, 0)
+		for row in rows:
+			self.assertIn(row["reference_doctype"], reader.scope.readable)
+		self.assertNotIn("Sales Invoice", {row["reference_doctype"] for row in rows})
+		names = {row["name"] for row in rows}
+		self.assertIn(visible, names)
+		for name in hidden:
+			self.assertNotIn(name, names)
+
+	def test_territory_permission_matches_frappe(self):
+		grant_test_territory(self.ananya, self.records)
+		order = add_test_territory_order(self.records)
+		listed = set(frappe.get_list("Sales Order", user=self.ananya, pluck="name", limit=0))
+		self.assertLess(len(listed), frappe.db.count("Sales Order"))  # the permission narrows the list
+		self.assertEqual(self.names(self.ananya, "Sales Order"), listed)
+		self.assertIn(order, listed)
+		reader, plan = self.reader(self.ananya, "Sales Order")
+		outside = frappe.db.get_value("Sales Order", {"territory": ("!=", TEST_TERRITORY)})
+		self.assertEqual([r["name"] for r in reader.fetch_records_by_names(plan, [order, outside])], [order])
+
+	def test_shared_document_is_not_included(self):
+		grant_test_territory(self.ananya, self.records)
+		outside = frappe.db.get_value("Sales Order", {"territory": ("!=", TEST_TERRITORY), "docstatus": 1})
+		self.share("Sales Order", outside, self.ananya)
+		listed = set(frappe.get_list("Sales Order", user=self.ananya, pluck="name", limit=0))
+		self.assertIn(outside, listed)  # Frappe lists the shared order
+		self.assertNotIn(outside, self.names(self.ananya, "Sales Order"))
+		reader, plan = self.reader(self.ananya, "Sales Order")
+		self.assertEqual(reader.fetch_records_by_names(plan, [outside]), [])
