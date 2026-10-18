@@ -7,6 +7,7 @@ see is treated as missing and removed, and one it can now see is added (incremen
 
 import frappe
 
+from eve_agent.access.build import with_live_field_levels
 from eve_agent.access.profiles import PROFILE_DOCTYPE, mark_pending_and_rebuild, ready_profiles
 from eve_agent.access.reader import ProfileReader
 from eve_agent.access.scope import AccessScope, filter_plan
@@ -20,10 +21,13 @@ def apply_keys_to_profiles(settings, keys: list[str], plan: DataPlan) -> list[st
 	A failed update may leave a graph showing too much (a record that left the profile's territory, say),
 	so that profile goes Pending at once and is rebuilt. Its keys are not queued again: a broken profile
 	never keeps the drain busy, and the other profiles still get the batch."""
+	# Without an active graph a profile is never served, and sync_keys_on_graph would use the main graph.
+	profiles = [profile for profile in ready_profiles() if profile.active_graph]
+	if not profiles:
+		return []
+	plan = with_live_field_levels(plan)  # so a field just moved to a higher permlevel never reaches them
 	failed = []
-	for profile in ready_profiles():
-		if not profile.active_graph:
-			continue  # never served; and sync_keys_on_graph would fall back to the main graph
+	for profile in profiles:
 		try:
 			scope = AccessScope.from_json(profile.scope_json)
 			reader = ProfileReader(scope)

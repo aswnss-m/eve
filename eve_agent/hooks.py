@@ -124,9 +124,6 @@ doc_events = {
 	"DocType": {"on_update": _LAYOUT_HOOK, "on_trash": _LAYOUT_HOOK},
 }
 
-# Profile builds wait for the schema sync after a field layout change; `bench clear-cache` keeps that.
-persistent_cache_keys = ["eve_agent:field_layout_changed"]
-
 scheduler_events = {
 	"cron": {
 		"*/5 * * * *": ["eve_agent.sync.refresh.sweep"],

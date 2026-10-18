@@ -8,7 +8,7 @@ import re
 import unittest
 from contextlib import ExitStack
 from dataclasses import replace
-from unittest.mock import DEFAULT, Mock, call, patch
+from unittest.mock import Mock, call, patch
 
 import frappe
 import frappe.share
@@ -19,7 +19,7 @@ from frappe.utils import add_days, now_datetime, today
 from frappe.utils.nestedset import get_root_of
 
 from eve_agent.access import fanout, members
-from eve_agent.access.build import build_profile_graph, profile_graph_names
+from eve_agent.access.build import build_profile_graph, profile_graph_names, with_live_field_levels
 from eve_agent.access.members import member_counts
 from eve_agent.access.profiles import (
 	CAPACITY_LOG_FLAG,
@@ -43,6 +43,7 @@ from eve_agent.access.resolve import hook_restricted, is_own_record, resolve_sco
 from eve_agent.access.scope import SPECIAL_DROP, SPECIAL_KEEP, AccessScope, filter_plan
 from eve_agent.falkor.importer.data_rows import FIELD_ALLOWLIST, STANDARD_FIELDS
 from eve_agent.falkor.importer.incremental import IncrementalSummary, make_key
+from eve_agent.install import after_migrate
 from eve_agent.sync import record_reader
 from eve_agent.sync.data_sync import (
 	_run_data_sync,
@@ -52,13 +53,7 @@ from eve_agent.sync.data_sync import (
 	load_plan,
 )
 from eve_agent.sync.refresh import FLAG_KEY, PENDING_KEY, _drain, _key, queue_keys
-from eve_agent.sync.schema_sync import (
-	LAYOUT_CHANGED_KEY,
-	get_graph_client,
-	mark_schema_outdated,
-	run_schema_sync,
-	schema_outdated,
-)
+from eve_agent.sync.schema_sync import get_graph_client, run_schema_sync
 
 TEST_TERRITORY = "Eve Test South"
 TEST_ROLE = "Eve Test Owner Role"
@@ -921,6 +916,7 @@ class ProfileFanOutTests(FrappeTestCase):
 
 	def setUp(self):
 		self.records = []  # (doctype, name); tearDown purges them newest first and drains them out
+		self.meta_changed = False
 		self.enqueue = patch("frappe.enqueue").start()
 		patch("frappe.publish_realtime").start()
 		patch("frappe.model.document.update_global_search").start()  # no search rows for deleted records
@@ -931,7 +927,8 @@ class ProfileFanOutTests(FrappeTestCase):
 		frappe.db.commit()
 		if keys:
 			self.drain(*keys)
-		frappe.cache.delete(frappe.cache.make_key(LAYOUT_CHANGED_KEY))  # stands in for the schema sync
+		if self.meta_changed:
+			frappe.clear_cache(doctype="Sales Order")
 		for key in self.keys:
 			if self.status(key) != "Ready":
 				run_profile_build(key)
@@ -1008,18 +1005,21 @@ class ProfileFanOutTests(FrappeTestCase):
 		return invoice.name
 
 	def add_permlevel_setter(self) -> str:
+		"""Move Sales Order `delivery_date` (set on every order) to permlevel 2, which no role reads. Sales
+		Manager (priya) reads level 1 on Sales Order, so level 1 would not hide it from her."""
 		setter = frappe.get_doc(
 			{
 				"doctype": "Property Setter",
 				"doctype_or_field": "DocField",
 				"doc_type": "Sales Order",
-				"field_name": "po_no",
+				"field_name": "delivery_date",
 				"property": "permlevel",
-				"value": "1",
+				"value": "2",
 				"property_type": "Int",
 			}
 		).insert(ignore_permissions=True)
 		self.records.append(("Property Setter", setter.name))
+		self.meta_changed = True
 		return setter.name
 
 	def test_new_order_reaches_sales_profile(self):
@@ -1092,61 +1092,89 @@ class ProfileFanOutTests(FrappeTestCase):
 
 	def test_permlevel_change_marks_pending(self):
 		self.require_only_own_profiles()
-		setter = self.add_permlevel_setter()
+		self.add_permlevel_setter()
 		self.assertEqual(set(frappe.get_all(PROFILE_DOCTYPE, pluck="status")), {"Pending"})
-		self.assertEqual((self.jobs(self.BUILD_JOB), self.jobs(self.SCHEMA_SYNC_JOB)), (2, 1))
-		# Profile plans take field levels from the schema graph, which is old until the queued schema
-		# sync has run: until then a build would show the field again, so builds wait.
-		frappe.db.commit()
-		self.assertTrue(schema_outdated())
-		self.assertTrue(run_profile_build(self.sales.key).startswith("Skipped: waiting for the schema sync"))
-		self.assertEqual(self.status(self.sales.key), "Pending")
-		# Deleting the setter moves the field back: another schema sync.
+		self.assertEqual(self.jobs(self.BUILD_JOB), 2)
+
+	def test_rebuild_and_fan_out_use_live_field_levels(self):
+		"""No schema sync runs here: the schema graph still has delivery_date at level 0."""
+		dated = "MATCH (o:`Sales Order`) WHERE o.delivery_date IS NOT NULL RETURN count(o) AS n"
+		cypher = "MATCH (o:`Sales Order` {name: $name}) RETURN o.delivery_date AS delivery_date"
+		self.assertGreater(self.rows(self.sales.key, dated)[0]["n"], 0)
+		recent = self.make_order(submit=False)  # changed just before the build: its catch-up writes it again
+		setter = self.add_permlevel_setter()
+		run_profile_build(self.sales.key)
+		self.assertEqual(self.status(self.sales.key), "Ready")
+		self.assertEqual(self.rows(self.sales.key, dated), [{"n": 0}])
+		self.assertEqual(self.rows(self.sales.key, cypher, name=recent), [{"delivery_date": None}])
+		self.assertGreater(self.rows(None, dated)[0]["n"], 0)  # the main graph keeps it
+		# A record drained in afterwards is written without it too.
+		order = self.make_order(submit=False)
+		self.drain(make_key("Sales Order", order))
+		self.assertEqual(self.rows(self.sales.key, cypher, name=order), [{"delivery_date": None}])
+		self.assertIsNotNone(self.rows(None, cypher, name=order)[0]["delivery_date"])
+		# Deleting the setter moves the field back: every profile is rebuilt again.
 		self.records.remove(("Property Setter", setter))
 		purge("Property Setter", setter)
+		self.assertEqual(set(frappe.get_all(PROFILE_DOCTYPE, pluck="status")), {"Pending"})
+
+	def test_live_field_levels_drop_unknown_fields(self):
+		plan = data_plan()
+		orders = next(p for p in plan.parents if p.name == "Sales Order")
+		orders.value_fields.append("eve_no_such_field")
+		orders.field_levels["eve_no_such_field"] = 0
+		live = next(p for p in with_live_field_levels(plan).parents if p.name == "Sales Order")
+		self.assertNotIn("eve_no_such_field", live.value_fields)
+		self.assertNotIn("eve_no_such_field", live.field_levels)
+		self.assertEqual(
+			live.field_levels, {f: v for f, v in orders.field_levels.items() if f != "eve_no_such_field"}
+		)
+
+	def test_after_migrate_marks_profiles_pending(self):
+		self.require_only_own_profiles()
+		with patch("eve_agent.install.ensure_sync_status_block"):
+			after_migrate()
+		self.assertEqual(set(frappe.get_all(PROFILE_DOCTYPE, pluck="status")), {"Pending"})
+		# Not rebuilt yet: the schema sync queued after migrate does that (ruling R2).
+		self.assertEqual((self.jobs(self.BUILD_JOB), self.jobs(self.SCHEMA_SYNC_JOB)), (0, 1))
+		down = patch("eve_agent.access.profiles.mark_all_pending", side_effect=RuntimeError("down"))
+		with (
+			patch("eve_agent.install.ensure_sync_status_block"),
+			down,
+			patch("frappe.log_error") as log_error,
+		):
+			after_migrate()  # never breaks the migrate
+		log_error.assert_called_once()
 		self.assertEqual(self.jobs(self.SCHEMA_SYNC_JOB), 2)
 
 	def test_layout_hook_conditions(self):
 		marked = patch("eve_agent.access.profiles.mark_all_pending_and_rebuild").start()
-		outdated = patch("eve_agent.access.profiles.mark_schema_outdated").start()
 
-		def doc(doctype, **values):
-			return frappe.get_doc({"doctype": doctype, **values})
+		def changes(doctype, before=None, **values) -> bool:
+			doc = frappe.get_doc({"doctype": doctype, **values})
+			if before:
+				doc._doc_before_save = frappe.get_doc({"doctype": doctype, **values, **before})
+			calls = marked.call_count
+			on_field_layout_change(doc, "on_update")
+			return marked.call_count > calls
 
 		setter = {"doc_type": "Sales Order", "field_name": "po_no", "value": "1"}
-		on_field_layout_change(doc("Property Setter", property="hidden", **setter))
-		self.assertEqual(marked.call_count, 0)
-		permlevel = doc("Property Setter", property="permlevel", **setter)
-		on_field_layout_change(permlevel)
-		on_field_layout_change(permlevel, "on_trash")  # once per transaction
-		self.assertEqual((marked.call_count, self.jobs(self.SCHEMA_SYNC_JOB)), (1, 1))
-		frappe.db.rollback()  # rolled back: nothing is outdated, and the next change counts again
-		outdated.assert_not_called()
-
+		self.assertFalse(changes("Property Setter", property="hidden", **setter))
+		self.assertTrue(changes("Property Setter", property="permlevel", **setter))
 		field = {"dt": "Sales Order", "fieldname": "eve_test_field", "fieldtype": "Data"}
-		on_field_layout_change(doc("Custom Field", permlevel=0, **field))  # a new field at level 0
-		self.assertEqual(marked.call_count, 1)
-		on_field_layout_change(doc("Custom Field", permlevel=2, **field))
-		self.assertEqual(marked.call_count, 2)
-		frappe.db.commit()
-		outdated.assert_called_once()  # once committed
-		moved = doc("Custom Field", permlevel=0, **field)
-		moved._doc_before_save = doc("Custom Field", permlevel=1, **field)
-		on_field_layout_change(moved)
-		self.assertEqual(marked.call_count, 3)
-		frappe.db.commit()
-		on_field_layout_change(doc("DocType", name="Eve Test DocType", module="Eve Agent"), "on_trash")
-		self.assertEqual(marked.call_count, 4)
-		frappe.db.commit()
+		self.assertFalse(changes("Custom Field", permlevel=0, **field))  # a new field at level 0
+		self.assertTrue(changes("Custom Field", permlevel=2, **field))
+		self.assertTrue(changes("Custom Field", before={"permlevel": 1}, permlevel=0, **field))  # moved back
+		self.assertFalse(changes("Custom Field", before={"label": "Old"}, permlevel=0, **field))
+		self.assertTrue(changes("DocType", name="Eve Test DocType", module="Eve Agent"))
 		in_migrate = frappe.flags.in_migrate
-		frappe.flags.in_migrate = True  # the schema sync after migrate does it then
+		frappe.flags.in_migrate = True  # after migrate, install.after_migrate and the schema sync do it
 		try:
-			on_field_layout_change(permlevel)
+			self.assertFalse(changes("Property Setter", property="permlevel", **setter))
 		finally:
 			frappe.flags.in_migrate = in_migrate
-		self.assertEqual((marked.call_count, outdated.call_count), (4, 3))
 
-	def test_schema_sync_rebuilds_profiles_and_releases_builds(self):
+	def test_schema_sync_rebuilds_profiles(self):
 		self.require_only_own_profiles()
 		with ExitStack() as stack:
 			stack.enter_context(patch("eve_agent.sync.schema_sync.read_doctype_metas", return_value=[]))
@@ -1156,26 +1184,16 @@ class ProfileFanOutTests(FrappeTestCase):
 			written = stack.enter_context(patch.object(frappe.db, "set_single_value"))  # Settings stay as is
 			log_error = stack.enter_context(patch("frappe.log_error"))
 
-			mark_schema_outdated()
 			imported.side_effect = RuntimeError("FalkorDB is down")
 			run_schema_sync()  # a failed sync changes nothing
 			self.assertEqual(set(frappe.get_all(PROFILE_DOCTYPE, pluck="status")), {"Ready"})
 			self.assertEqual(self.jobs(self.BUILD_JOB), 0)
-			self.assertTrue(schema_outdated())
 
 			imported.side_effect = None
-			run_schema_sync()  # the field levels are current again, and every profile is rebuilt with them
-			self.assertFalse(schema_outdated())
+			run_schema_sync()
 			self.assertEqual(set(frappe.get_all(PROFILE_DOCTYPE, pluck="status")), {"Pending"})
 			self.assertEqual(self.jobs(self.BUILD_JOB), 2)
 
-			# A layout change while the sync reads the metas is not in the schema graph: builds keep waiting.
-			mark_schema_outdated()
-			imported.side_effect = lambda *args: mark_schema_outdated() or DEFAULT
-			run_schema_sync()
-			self.assertTrue(schema_outdated())
-
-			imported.side_effect = None
 			log_error.reset_mock()
 			down = RuntimeError("queue is down")
 			with patch("eve_agent.access.profiles.mark_all_pending_and_rebuild", side_effect=down):

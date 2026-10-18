@@ -15,19 +15,13 @@ import frappe
 from frappe.utils import add_days, add_to_date, cint, now_datetime
 from frappe.utils.synchronization import filelock
 
-from eve_agent.access.build import build_profile_graph, profile_graph_names
+from eve_agent.access.build import build_profile_graph, profile_graph_names, with_live_field_levels
 from eve_agent.access.members import cached_member_counts, member_counts
 from eve_agent.access.reader import ProfileReader
 from eve_agent.access.scope import AccessScope, filter_plan
 from eve_agent.falkor.importer.data_rows import parse_lines
 from eve_agent.sync.data_sync import CATCH_UP_OVERLAP_SECONDS, catch_up, load_plan
-from eve_agent.sync.schema_sync import (
-	SETTINGS_DOCTYPE,
-	enqueue_schema_sync,
-	get_graph_client,
-	mark_schema_outdated,
-	schema_outdated,
-)
+from eve_agent.sync.schema_sync import SETTINGS_DOCTYPE, get_graph_client
 
 PROFILE_DOCTYPE = "Eve Access Profile"
 
@@ -180,8 +174,6 @@ def run_profile_build(key: str) -> str:
 	row = None
 	try:
 		for _ in range(BUILD_ATTEMPTS):
-			if schema_outdated():  # its field levels would be the old ones; the schema sync rebuilds it
-				return "Skipped: waiting for the schema sync after a field layout change"
 			fields = ["status", "scope_json", "active_graph", "modified"]
 			row = frappe.db.get_value(PROFILE_DOCTYPE, key, fields, as_dict=True)
 			if not row:
@@ -227,7 +219,7 @@ def _build_once(key: str, row) -> str | None:
 	text = build_profile_graph(settings, scope, target)
 	with filelock(GRAPH_WRITE_LOCK, timeout=300):
 		frappe.db.commit()  # Fresh snapshot: see everything committed during the build.
-		plan = filter_plan(load_plan(settings), scope)
+		plan = filter_plan(with_live_field_levels(load_plan(settings)), scope)
 		catch_up(settings, target, plan, started_at, started_ts, reader=ProfileReader(scope))
 		# Locks the row: a member asking now waits for the switch, then gets the new graph.
 		fields = ["modified", "waiting_users"]
@@ -290,6 +282,13 @@ def mark_all_pending_and_rebuild() -> None:
 		mark_pending_and_rebuild(key)
 
 
+def mark_all_pending() -> None:
+	"""After migrate: no profile graph is used until rebuilt; the schema sync queued then rebuilds them all
+	(run_schema_sync), with whatever fields it adds. Setting the status bumps `modified` as above."""
+	for key in frappe.get_all(PROFILE_DOCTYPE, pluck="name"):
+		frappe.db.set_value(PROFILE_DOCTYPE, key, "status", "Pending")
+
+
 def enqueue_profile_rebuilds() -> None:
 	"""After a main graph rebuild: Ready profiles rebuild into their other slot and stay Ready meanwhile."""
 	for key in frappe.get_all(PROFILE_DOCTYPE, {"status": "Ready"}, pluck="name"):
@@ -302,19 +301,13 @@ def enqueue_profile_rebuilds() -> None:
 def on_field_layout_change(doc, method=None) -> None:
 	"""doc_events hook for Property Setter, Custom Field and DocType: a field may have moved permlevel.
 
-	Profile graphs may now hold a field their members can't read, so every profile goes Pending with
-	this save. Their plans take field levels from the schema graph, so the schema sync queued here is
-	what rebuilds them, and builds wait for it. Once per transaction. Not during install, migrate or
-	patches: the schema sync after migrate rebuilds them then."""
+	Profile graphs may now hold a field their members can't read, so every profile goes Pending with this
+	save and is rebuilt; builds take field levels from the live meta (with_live_field_levels). Not during
+	install, migrate or patches: after migrate, install.after_migrate and the schema sync do it."""
 	if frappe.flags.in_install or frappe.flags.in_migrate or frappe.flags.in_patch:
 		return
-	if getattr(frappe.local, "eve_layout_changed", False) or not _changes_field_layout(doc):
-		return
-	frappe.local.eve_layout_changed = True
-	frappe.db.after_commit.add(_layout_change_committed)  # added first: runs before the builds are sent
-	frappe.db.after_rollback.add(_end_layout_change)
-	mark_all_pending_and_rebuild()
-	enqueue_schema_sync()
+	if _changes_field_layout(doc):
+		mark_all_pending_and_rebuild()
 
 
 def _changes_field_layout(doc) -> bool:
@@ -324,15 +317,6 @@ def _changes_field_layout(doc) -> bool:
 		level, before = cint(doc.get("permlevel")), doc.get_doc_before_save()
 		return bool(level) or bool(before and cint(before.get("permlevel")) != level)
 	return True
-
-
-def _layout_change_committed() -> None:
-	_end_layout_change()
-	mark_schema_outdated()
-
-
-def _end_layout_change() -> None:
-	frappe.local.eve_layout_changed = False
 
 
 # --- Clean-up ----------------------------------------------------------------
