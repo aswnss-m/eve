@@ -6,8 +6,9 @@ the own-record narrowing and the Comment rule. When in doubt a record is left ou
 """
 
 import frappe
+from frappe.core.doctype.user.user import STANDARD_USERS
 from frappe.model.db_query import DatabaseQuery
-from frappe.utils import cint
+from frappe.utils import cint, make_filter_tuple
 
 from eve_agent.access.scope import AccessScope
 from eve_agent.falkor.importer.data_rows import DocTypePlan
@@ -25,6 +26,10 @@ def match_condition(doctype: str, scope: AccessScope) -> str:
 	parts = [*query.match_conditions, *_own_record_conditions(doctype, scope)]
 	if doctype == "Comment":
 		parts.append(_comment_condition(scope))
+	if doctype == "User":
+		# Frappe's User list hook (user.get_permission_query_conditions) hides these from non-admins.
+		standard = ", ".join(frappe.db.escape(user, percent=False) for user in STANDARD_USERS)
+		parts.append(f"`tabUser`.`name` not in ({standard})")
 	return " and ".join(f"({part})" for part in parts)
 
 
@@ -109,10 +114,12 @@ class ProfileReader:
 		)
 
 	def fetch_records_by_names(self, plan: DocTypePlan, names: list[str]) -> list[dict]:
-		"""The records in `names` that still exist and the profile may read."""
+		"""The records in `names` that still exist, match the plan's filters and the profile may read."""
 		if not names or not frappe.db.table_exists(plan.name) or not self.scope.can_see(plan.name):
 			return []
-		return self._execute(plan, filters={"name": ("in", names)})
+		# A list, not a merged dict, so a plan filter on `name` is ANDed rather than replaced.
+		filters = [make_filter_tuple(plan.name, key, value) for key, value in (plan.filters or {}).items()]
+		return self._execute(plan, filters=[*filters, [plan.name, "name", "in", names]])
 
 	def _execute(self, plan: DocTypePlan, **kwargs) -> list[dict]:
 		query = ProfileQuery(plan.name, match_condition(plan.name, self.scope))

@@ -99,12 +99,12 @@ def grant_owner_only_read(user: str, doctype: str, records: list) -> None:
 	frappe.clear_cache(user=user)
 
 
-def add_comment(doctype: str, name: str, records: list) -> str:
-	"""A user comment (comment_type "Comment", the kind Eve syncs) on record `name`."""
+def add_comment(doctype: str, name: str, records: list, comment_type: str = "Comment") -> str:
+	"""A comment on record `name`; by default a user comment, the only kind Eve syncs."""
 	comment = frappe.get_doc(
 		{
 			"doctype": "Comment",
-			"comment_type": "Comment",
+			"comment_type": comment_type,
 			"reference_doctype": doctype,
 			"reference_name": name,
 			"content": "Eve test comment",
@@ -358,6 +358,19 @@ class ProfileReaderTests(FrappeTestCase):
 		self.assertIn(visible, names)
 		for name in hidden:
 			self.assertNotIn(name, names)
+
+	def test_standard_users_are_hidden(self):
+		names = self.names(self.rahul, "User")
+		self.assertIn(self.ananya, names)
+		self.assertNotIn("Administrator", names)  # Frappe's User list hook hides it from non-admins
+
+	def test_fetch_by_names_honours_plan_filters(self):
+		order = frappe.get_list("Sales Order", user=self.rahul, pluck="name", limit=1)[0]
+		comment = add_comment("Sales Order", order, self.records)
+		info = add_comment("Sales Order", order, self.records, comment_type="Info")
+		reader, plan = self.reader(self.rahul, "Comment")
+		rows = reader.fetch_records_by_names(plan, [comment, info])
+		self.assertEqual([row["name"] for row in rows], [comment])  # the plan keeps comment_type "Comment"
 
 	def test_territory_permission_matches_frappe(self):
 		grant_test_territory(self.ananya, self.records)
