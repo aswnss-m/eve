@@ -377,8 +377,8 @@ Production passwords are shared outside this repo.
 
 | What                                                   | Where                                                      | Username        | Password                                                     |
 | ------------------------------------------------------ | ---------------------------------------------------------- | --------------- | ------------------------------------------------------------ |
-| ERP, Administrator | [http://167.235.241.112:8080](http://167.235.241.112:8080) | `Administrator` | _not in the repo: ask the team_ |
-| FalkorDB Browser, login gate | [http://167.235.241.112:4000](http://167.235.241.112:4000) | `eve-erp` | _not in the repo: ask the team_ |
+| ERP, Administrator | [http://167.235.241.112:8080](http://167.235.241.112:8080) | `Administrator` | admin_ |
+| FalkorDB Browser, login gate | [http://167.235.241.112:4000](http://167.235.241.112:4000) | `eve-erp` | sM4NFZYdGU6EyVwVqoyt |
 | FalkorDB Browser, database connection (after the gate) | the browser's login page                                   | blank           | blank; host `localhost`, port `6379`                         |
 | Server shell                                           | `ssh ssw@167.235.241.112`                                  | `ssw`           | SSH key, no password; `ssw` can run `docker`                 |
 | LLM (DeepSeek)                                         | Eve Agent Settings → LLM API Key                           | n/a             | stored encrypted in the site; model `deepseek/deepseek-chat` |
@@ -395,9 +395,9 @@ answers only from what their roles can read in Frappe.
 
 | Access type     | Username                     | Password         | Roles                           | Ask Eve | What to check                                                                                          |
 | --------------- | ---------------------------- | ---------------- | ------------------------------- | ------- | ------------------------------------------------------------------------------------------------------ |
-| Sales | `eve.sales@cozycrew.test` | _not in the repo: ask the team_ | Sales Manager, Sales User | yes | Customers, quotations, sales orders and invoices answer; purchasing and GL questions don't |
-| Accounts | `eve.accounts@cozycrew.test` | _not in the repo: ask the team_ | Accounts Manager, Accounts User | yes | Invoices, payments and GL answer; the answers differ from the Sales user's |
-| Stock (no chat) | `eve.stock@cozycrew.test` | _not in the repo: ask the team_ | Stock User | no | No Ask Eve button. To test a narrow chat profile, add `Stock User` to Chat Roles in Eve Agent Settings |
+| Sales | `eve.sales@cozycrew.test` | sbGHqHJsmuDygXao | Sales Manager, Sales User | yes | Customers, quotations, sales orders and invoices answer; purchasing and GL questions don't |
+| Accounts | `eve.accounts@cozycrew.test` | Beu7ph89jsykjihA| Accounts Manager, Accounts User | yes | Invoices, payments and GL answer; the answers differ from the Sales user's |
+| Stock (no chat) | `eve.stock@cozycrew.test` | Ztvdiwz2TmbMx7A9 | Stock User | no | No Ask Eve button. To test a narrow chat profile, add `Stock User` to Chat Roles in Eve Agent Settings |
 
 
 
