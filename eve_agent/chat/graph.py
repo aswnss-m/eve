@@ -42,9 +42,11 @@ class Graph:
 		self.name = name
 		self._client = GraphClient(_connection(url), name)
 
-	def ro(self, title: str, cypher: str, params: dict | None = None) -> QueryRun:
+	def ro(
+		self, title: str, cypher: str, params: dict | None = None, timeout_ms: int | None = None
+	) -> QueryRun:
 		started = time.monotonic()
-		rows = [plain(row) for row in self._client.ro_rows(cypher, params)]
+		rows = [plain(row) for row in self._client.ro_rows(cypher, params, timeout_ms)]
 		return QueryRun(
 			title=title,
 			cypher=cypher.strip(),

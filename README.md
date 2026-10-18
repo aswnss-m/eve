@@ -43,7 +43,7 @@ The agent has no other copy of the ERP data. Without FalkorDB it cannot answer a
 | `dormant_customers`, `supplier_risk` | Customers that went quiet; items with only one supplier, weighted by the revenue that depends on them |
 | `who_knows` | People linked to a record through `CREATED_BY`, comments, ToDos, `MANAGED_BY` / `SOLD_TO`, with department and designation from `Employee -IS_USER→ User` |
 | `decision_trail` | Walks the document-flow edges around a document, with each step's creator, comments and ToDos |
-| `explain_connection` | `shortestPath` between any two records |
+| `explain_connection` | The shortest path between any two records, in any direction, up to 6 hops. It searches from both records at once, one hop per query, each with a 2-second timeout and a 20,000-edge limit |
 | `graph_schema`, `describe_doctype`, `run_cypher` | Schema discovery and a guarded read-only text-to-Cypher fallback |
 | `recall`, `remember_insight` | Read and write the user's memory graph |
 

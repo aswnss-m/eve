@@ -12,7 +12,10 @@ import json
 import os
 import re
 import unittest
+import unittest.mock
 from types import SimpleNamespace
+
+import redis
 
 from eve_agent.access.scope import AccessScope
 from eve_agent.chat.common import ChatConfig, ChatUser, QueryRun, Tool, ToolContext, result
@@ -65,7 +68,7 @@ class FakeGraph:
 		self.name = name
 		self.calls = []
 
-	def ro(self, title, cypher, params=None):
+	def ro(self, title, cypher, params=None, timeout_ms=None):
 		assert_read_only(cypher)
 		self.calls.append((title, cypher, params or {}))
 		return QueryRun(title=title, cypher=cypher.strip(), params=params or {}, rows=[], ms=0)
@@ -348,6 +351,123 @@ class ToolTests(unittest.TestCase):
 	def test_fulltext_query_strips_operators(self):
 		self.assertEqual(fulltext_query("Acme (Ltd) & Co_1"), "acme* ltd* co* 1*")
 		self.assertEqual(fulltext_query("   "), "")
+
+
+# A small graph for explain_connection: Acme reaches Bolt Co in 4 hops through Ana and Zeta,
+# and in 2 through I-2. Lonely Co has no edges.
+PATH_NODES = {
+	1: ("Customer", "Acme"),
+	2: ("Sales Person", "Ana"),
+	3: ("Customer", "Zeta"),
+	4: ("Item", "I-1"),
+	5: ("Supplier", "Bolt Co"),
+	6: ("Item", "I-2"),
+	7: ("Supplier", "Lonely Co"),
+}
+PATH_EDGES = (  # (source, type, target)
+	(1, "MANAGED_BY", 2),
+	(3, "MANAGED_BY", 2),
+	(3, "BOUGHT", 4),
+	(5, "SUPPLIES", 4),
+	(1, "BOUGHT", 6),
+	(5, "SUPPLIES", 6),
+)
+PATH_ENDS = {"from_doctype": "Customer", "from_name": "Acme", "to_doctype": "Supplier", "to_name": "Bolt Co"}
+
+
+class EntityToolTests(unittest.TestCase):
+	class PathGraph(FakeGraph):
+		"""Answers the queries explain_connection sends, by query title, from PATH_NODES and `edges`."""
+
+		def __init__(self, name, edges=PATH_EDGES, timeout_on_step=None):
+			super().__init__(name)
+			self.edges = edges
+			self.timeout_on_step = timeout_on_step
+			self.timeouts = []
+
+		def ro(self, title, cypher, params=None, timeout_ms=None):
+			params = params or {}
+			if title.startswith("Neighbours"):
+				self.timeouts.append(timeout_ms)
+				if self.timeout_on_step == len(self.timeouts):
+					raise redis.exceptions.ResponseError("Query timed out")
+			run = super().ro(title, cypher, params)
+			by_name = {name: i for i, (_, name) in PATH_NODES.items()}
+			if title == "labels":
+				run.rows = [{"label": dt} for dt in {dt for dt, _ in PATH_NODES.values()}]
+			elif title.startswith("Endpoints"):
+				run.rows = [{"a": by_name.get(params["a"]), "b": by_name.get(params["b"])}]
+			elif title.startswith("Neighbours"):
+				ids = set(params["ids"])
+				rows = [{"node": s, "next": t, "rel": r} for s, r, t in self.edges if s in ids]
+				rows += [{"node": t, "next": s, "rel": r} for s, r, t in self.edges if t in ids]
+				run.rows = rows[: params["limit"]]
+			elif title.startswith("Records on the path"):
+				run.rows = [
+					{"id": i, "doctype": PATH_NODES[i][0], "name": PATH_NODES[i][1]} for i in params["ids"]
+				]
+			return run
+
+	class TimingOutGraph(FakeGraph):
+		def ro(self, title, cypher, params=None):
+			raise redis.exceptions.ResponseError("Query timed out")
+
+	def call(self, ctx, name, **args):
+		tool = next(t for t in build_tools(ctx) if t.name == name)
+		return tool.run(tool.params.model_validate(args))
+
+	def test_explain_connection_finds_the_shortest_path_in_any_direction(self):
+		data = self.PathGraph("paths")
+		out = self.call(make_ctx(data), "explain_connection", **PATH_ENDS)
+		self.assertEqual([s["name"] for s in out["sources"]], ["Acme", "I-2", "Bolt Co"])
+		self.assertEqual(out["queries"][0]["rows"][0]["relationships"], ["BOUGHT", "SUPPLIES"])
+		self.assertEqual(len(out["queries"][0]["rows"]), 1)
+		self.assertNotIn("note", out)
+
+	def test_explain_connection_walks_one_hop_per_query(self):
+		# FalkorDB 4.22 rejects an undirected shortestPath(); algo.SPpaths and variable-length matches
+		# ignore the query timeout (they froze the server), and an untyped [*2] between two bound nodes
+		# crashes it. Each query expands one hop, with a timeout and a row limit.
+		data = self.PathGraph("paths_long", edges=PATH_EDGES[:4])
+		out = self.call(make_ctx(data), "explain_connection", **PATH_ENDS)
+		self.assertEqual([s["name"] for s in out["sources"]], ["Acme", "Ana", "Zeta", "I-1", "Bolt Co"])
+		self.assertEqual(
+			out["queries"][0]["rows"][0]["relationships"], ["MANAGED_BY", "MANAGED_BY", "BOUGHT", "SUPPLIES"]
+		)
+		for _, cypher, _ in data.calls:
+			self.assertNotIn("*", cypher)
+			self.assertNotIn("shortestPath(", cypher)
+			self.assertNotIn("algo.", cypher)
+		self.assertTrue(data.timeouts and all(data.timeouts))
+
+	def test_explain_connection_without_a_path(self):
+		data = self.PathGraph("paths_none")
+		out = self.call(make_ctx(data), "explain_connection", **dict(PATH_ENDS, to_name="Lonely Co"))
+		self.assertEqual(out["sources"], [])
+		self.assertEqual(out["note"], "No path within 6 hops.")
+
+	def test_explain_connection_stops_when_the_search_fans_out(self):
+		hub = [(1, "BOUGHT", 100 + i) for i in range(10)]
+		data = self.PathGraph("paths_hub", edges=hub)
+		with unittest.mock.patch("eve_agent.chat.tools.entities.PATH_MAX_EDGES", 5):
+			out = self.call(make_ctx(data), "explain_connection", **PATH_ENDS)
+		self.assertEqual(out["sources"], [])
+		self.assertIn("too many connections", out["note"])
+
+	def test_explain_connection_stops_when_a_step_takes_too_long(self):
+		data = self.PathGraph("paths_slow", edges=PATH_EDGES[:4], timeout_on_step=2)
+		out = self.call(make_ctx(data), "explain_connection", **PATH_ENDS)
+		self.assertEqual(out["sources"], [])
+		self.assertIn("took too long", out["note"])
+
+	def test_find_entity_reports_graph_errors(self):
+		# A timeout is a failure the model should hear about, not "Nothing matched".
+		with self.assertRaisesRegex(redis.exceptions.ResponseError, "timed out"):
+			self.call(make_ctx(self.TimingOutGraph()), "find_entity", text="acme")
+
+	def test_find_entity_skips_doctypes_without_records(self):
+		out = self.call(make_ctx(), "find_entity", text="acme", doctype="No Such DocType")
+		self.assertEqual(out["note"], "Nothing matched 'acme'.")
 
 
 class ActionToolTests(unittest.TestCase):

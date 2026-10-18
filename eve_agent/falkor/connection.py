@@ -82,11 +82,18 @@ class GraphClient:
 		1, 12
 	)
 
-	def ro_rows(self, cypher: str, params: dict | None = None) -> list[dict]:
-		"""Read-only query returning one dict per row, with typed values."""
+	def ro_rows(self, cypher: str, params: dict | None = None, timeout_ms: int | None = None) -> list[dict]:
+		"""Read-only query returning one dict per row, with typed values.
+
+		timeout_ms overrides the server's read timeout for this query. A long read on a graph
+		stalls the whole server while a write to that graph waits behind it, so searches that can
+		blow up should pass a short one.
+		"""
 		assert_read_only(cypher)
-		raw = self.redis.execute_command("GRAPH.RO_QUERY", self.graph_name, with_params(cypher, params), "--compact")
-		return self._decode_rows(raw)
+		args = ["GRAPH.RO_QUERY", self.graph_name, with_params(cypher, params), "--compact"]
+		if timeout_ms:
+			args += ["TIMEOUT", timeout_ms]
+		return self._decode_rows(self.redis.execute_command(*args))
 
 	def rows(self, cypher: str, params: dict | None = None) -> list[dict]:
 		"""Read or write query returning typed rows. Only the memory graph is written this way."""

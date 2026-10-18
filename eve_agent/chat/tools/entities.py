@@ -2,10 +2,11 @@
 item across every relationship, and explain how two records connect."""
 
 import re
+import time
 
 from pydantic import BaseModel, Field
 
-from eve_agent.chat.common import Tool, ToolContext, label, refs, result, visible
+from eve_agent.chat.common import QueryRun, Tool, ToolContext, label, refs, result, visible
 from eve_agent.chat.tools.sales import NO_SALES_NOTE, SALES_ORDERS_NOTE
 from eve_agent.falkor.cypher.data_queries import FULLTEXT_LABELS
 
@@ -115,13 +116,76 @@ RETURN substring(si.posting_date, 0, 7) AS month, sum(k.qty) AS qty, sum(k.amoun
 ORDER BY month DESC LIMIT 12"""
 
 
-def shortest_path(a: str, b: str) -> str:
-	return f"""
-MATCH (a:{a} {{name: $a}}), (b:{b} {{name: $b}})
-WITH shortestPath((a)-[*..6]-(b)) AS p
-WHERE p IS NOT NULL
-RETURN [n IN nodes(p) | {{doctype: n.doctype, name: n.name, title: n.title}}] AS nodes,
-       [r IN relationships(p) | type(r)] AS relationships"""
+# explain_connection searches from both records at once, one hop per query. FalkorDB 4.22 rejects an
+# undirected shortestPath(); algo.SPpaths and variable-length matches can run far past the query
+# timeout (the whole server stalls while a sync's write waits behind them), and an untyped [*2]
+# between two bound nodes crashes it. A one-hop expansion streams rows, so its timeout and limit hold.
+MAX_HOPS = 6
+PATH_TIMEOUT_MS = 2000
+PATH_MAX_EDGES = 20000
+
+
+def path_endpoints(a: str, b: str) -> str:
+	return f"MATCH (a:{a} {{name: $a}}), (b:{b} {{name: $b}}) RETURN id(a) AS a, id(b) AS b"
+
+
+NEIGHBOURS = """
+UNWIND $ids AS i
+MATCH (n) WHERE id(n) = i
+MATCH (n)-[r]-(m)
+RETURN id(n) AS node, id(m) AS next, type(r) AS rel
+LIMIT $limit"""
+
+PATH_RECORDS = """
+UNWIND $ids AS i
+MATCH (n) WHERE id(n) = i
+RETURN id(n) AS id, n.doctype AS doctype, n.name AS name, n.title AS title"""
+
+
+def _walk(seen: dict, node: int) -> tuple[list[int], list[str]]:
+	"""Node ids and relationship types from `node` back to the record this side started from."""
+	nodes, rels = [node], []
+	while seen[node][0] is not None:
+		node, rel, _ = seen[node]
+		nodes.append(node)
+		rels.append(rel)
+	return nodes, rels
+
+
+def find_path(ctx: ToolContext, start: int, goal: int) -> tuple[list[int], list[str], str | None]:
+	"""Bidirectional breadth-first search: expand whichever side has fewer records, one hop at a time.
+	Returns the node ids and relationship types from start to goal, or a note saying why there are none."""
+	seen = ({start: (None, None, 0)}, {goal: (None, None, 0)})  # node -> (previous node, relationship, hops)
+	frontier = [[start], [goal]]
+	for step in range(1, MAX_HOPS + 1):
+		side = 0 if len(frontier[0]) <= len(frontier[1]) else 1
+		params = {"ids": frontier[side], "limit": PATH_MAX_EDGES + 1}
+		try:
+			run = ctx.data.ro(f"Neighbours, step {step}", NEIGHBOURS, params, timeout_ms=PATH_TIMEOUT_MS)
+		except Exception as exc:
+			if "timed out" not in str(exc).lower():
+				raise
+			return [], [], f"No path within {step - 1} hops; the search took too long."
+		if len(run.rows) > PATH_MAX_EDGES:
+			return [], [], f"No path within {step - 1} hops; too many connections to search through."
+		meet, best, added = None, None, []
+		for row in run.rows:
+			node, nxt = row["node"], row["next"]
+			if nxt in seen[side]:
+				continue
+			hops = seen[side][node][2] + 1
+			seen[side][nxt] = (node, row["rel"], hops)
+			added.append(nxt)
+			if nxt in seen[1 - side] and (best is None or hops + seen[1 - side][nxt][2] < best):
+				meet, best = nxt, hops + seen[1 - side][nxt][2]
+		if meet is not None:
+			head, head_rels = _walk(seen[0], meet)
+			tail, tail_rels = _walk(seen[1], meet)
+			return head[::-1] + tail[1:], head_rels[::-1] + tail_rels, None
+		if not added:
+			break  # one side has nowhere left to go
+		frontier[side] = added
+	return [], [], f"No path within {MAX_HOPS} hops."
 
 
 def fulltext_query(text: str) -> str:
@@ -158,22 +222,20 @@ def entity_tools(ctx: ToolContext) -> list[Tool]:
 		for lbl in labels:
 			if not query:
 				continue
-			try:
-				run = ctx.data.ro(f"Full-text search in {lbl}", FIND_FULLTEXT, {"label": lbl, "query": query})
-				if run.rows:
-					runs.append(run)
-			except Exception:
-				pass  # No full-text index for this label (custom DocType, or a graph built before indexes existed).
+			# A label without a full-text index returns no rows, not an error. Errors (a timeout,
+			# a lost connection) go to the model instead of reading as "Nothing matched".
+			run = ctx.data.ro(f"Full-text search in {lbl}", FIND_FULLTEXT, {"label": lbl, "query": query})
+			if run.rows:
+				runs.append(run)
 		if not runs:
 			for lbl in labels:
 				try:
-					run = ctx.data.ro(
-						f"Name contains, {lbl}", find_contains(label(ctx, lbl)), {"text": args.text.lower()}
-					)
-					if run.rows:
-						runs.append(run)
-				except Exception:
-					pass  # Unknown label: skip.
+					cypher = find_contains(label(ctx, lbl))
+				except ValueError:
+					continue  # No records with this label.
+				run = ctx.data.ro(f"Name contains, {lbl}", cypher, {"text": args.text.lower()})
+				if run.rows:
+					runs.append(run)
 		sources = [
 			{
 				"doctype": str(row.get("doctype")),
@@ -234,11 +296,35 @@ def entity_tools(ctx: ToolContext) -> list[Tool]:
 		return result(ctx, runs, sources, note)
 
 	def explain_connection(args: ExplainConnectionArgs) -> dict:
-		cypher = shortest_path(label(ctx, args.from_doctype), label(ctx, args.to_doctype))
-		run = ctx.data.ro("Shortest path", cypher, {"a": args.from_name, "b": args.to_name})
-		path = run.rows[0].get("nodes") if run.rows else None
-		nodes = [n for n in path or [] if n.get("name")]
-		note = None if nodes else "No path within 6 hops."
+		started = time.monotonic()
+		cypher = path_endpoints(label(ctx, args.from_doctype), label(ctx, args.to_doctype))
+		params = {"a": args.from_name, "b": args.to_name}
+		ends = ctx.data.ro("Endpoints", cypher, params, timeout_ms=PATH_TIMEOUT_MS)
+		if not ends.rows or ends.rows[0].get("a") is None or ends.rows[0].get("b") is None:
+			raise ValueError(
+				f"No {args.from_doctype} '{args.from_name}' or no {args.to_doctype} '{args.to_name}'. Try find_entity."
+			)
+		ids, rels, note = find_path(ctx, ends.rows[0]["a"], ends.rows[0]["b"])
+		nodes = []
+		if ids:
+			found = ctx.data.ro("Records on the path", PATH_RECORDS, {"ids": ids}, timeout_ms=PATH_TIMEOUT_MS)
+			by_id = {row["id"]: row for row in found.rows}
+			nodes = [
+				{"doctype": by_id[i]["doctype"], "name": by_id[i]["name"], "title": by_id[i].get("title")}
+				for i in ids
+				if by_id.get(i, {}).get("name")
+			]
+		# The search runs several queries; the step shown is its answer, with the query it repeats.
+		run = QueryRun(
+			title="Shortest path (searched from both records, one hop at a time)",
+			cypher=NEIGHBOURS.strip(),
+			params={
+				"from": f"{args.from_doctype} {args.from_name}",
+				"to": f"{args.to_doctype} {args.to_name}",
+			},
+			rows=[{"nodes": nodes, "relationships": rels}] if nodes else [],
+			ms=round((time.monotonic() - started) * 1000),
+		)
 		return result(ctx, [run], nodes, note)
 
 	return [
