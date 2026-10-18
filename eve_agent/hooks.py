@@ -104,6 +104,8 @@ boot_session = "eve_agent.boot.boot_session"
 after_install = "eve_agent.install.after_install"
 after_migrate = ["eve_agent.install.after_migrate"]
 
+_LAYOUT_HOOK = "eve_agent.access.profiles.on_field_layout_change"
+
 # Keep the data graph current: every synced record change queues an incremental
 # upsert into the active graph, a 5-minute sweep catches changes made without a
 # hook, and a nightly blue/green rebuild heals the rest (see eve_agent/sync/refresh.py).
@@ -115,8 +117,15 @@ doc_events = {
 		"on_update_after_submit": "eve_agent.sync.refresh.queue_record",
 		"on_trash": "eve_agent.sync.refresh.queue_record",
 		"after_rename": "eve_agent.sync.refresh.queue_record",
-	}
+	},
+	# A field moving to another permlevel makes every access profile unusable until it is rebuilt.
+	"Property Setter": {"on_update": _LAYOUT_HOOK, "on_trash": _LAYOUT_HOOK},
+	"Custom Field": {"on_update": _LAYOUT_HOOK, "on_trash": _LAYOUT_HOOK},
+	"DocType": {"on_update": _LAYOUT_HOOK, "on_trash": _LAYOUT_HOOK},
 }
+
+# Profile builds wait for the schema sync after a field layout change; `bench clear-cache` keeps that.
+persistent_cache_keys = ["eve_agent:field_layout_changed"]
 
 scheduler_events = {
 	"cron": {

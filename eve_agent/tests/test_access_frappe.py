@@ -8,16 +8,17 @@ import re
 import unittest
 from contextlib import ExitStack
 from dataclasses import replace
-from unittest.mock import Mock, call, patch
+from unittest.mock import DEFAULT, Mock, call, patch
 
 import frappe
 import frappe.share
 from frappe.core.doctype.user.user import STANDARD_USERS
+from frappe.model.delete_doc import delete_dynamic_links
 from frappe.tests.utils import FrappeTestCase
 from frappe.utils import add_days, now_datetime, today
 from frappe.utils.nestedset import get_root_of
 
-from eve_agent.access import members
+from eve_agent.access import fanout, members
 from eve_agent.access.build import build_profile_graph, profile_graph_names
 from eve_agent.access.members import member_counts
 from eve_agent.access.profiles import (
@@ -33,6 +34,7 @@ from eve_agent.access.profiles import (
 	enqueue_profile_rebuilds,
 	ensure_ready,
 	mark_all_pending_and_rebuild,
+	on_field_layout_change,
 	run_profile_build,
 	sweep_unmapped,
 )
@@ -40,10 +42,23 @@ from eve_agent.access.reader import ProfileReader
 from eve_agent.access.resolve import hook_restricted, is_own_record, resolve_scope
 from eve_agent.access.scope import SPECIAL_DROP, SPECIAL_KEEP, AccessScope, filter_plan
 from eve_agent.falkor.importer.data_rows import FIELD_ALLOWLIST, STANDARD_FIELDS
-from eve_agent.falkor.importer.incremental import IncrementalSummary
+from eve_agent.falkor.importer.incremental import IncrementalSummary, make_key
 from eve_agent.sync import record_reader
-from eve_agent.sync.data_sync import _run_data_sync, base_data_graph, build_data_graph, load_plan
-from eve_agent.sync.schema_sync import get_graph_client
+from eve_agent.sync.data_sync import (
+	_run_data_sync,
+	active_data_graph,
+	base_data_graph,
+	build_data_graph,
+	load_plan,
+)
+from eve_agent.sync.refresh import FLAG_KEY, PENDING_KEY, _drain, _key, queue_keys
+from eve_agent.sync.schema_sync import (
+	LAYOUT_CHANGED_KEY,
+	get_graph_client,
+	mark_schema_outdated,
+	run_schema_sync,
+	schema_outdated,
+)
 
 TEST_TERRITORY = "Eve Test South"
 TEST_ROLE = "Eve Test Owner Role"
@@ -175,6 +190,26 @@ def comments_on(doctype: str, name: str) -> set[str]:
 	"""Names of every Comment (of any type) on record `name`."""
 	filters = {"reference_doctype": doctype, "reference_name": name}
 	return set(frappe.get_all("Comment", filters, pluck="name"))
+
+
+def purge(doctype: str, name: str) -> list[str]:
+	"""Cancel and delete record `name` with what Frappe and ERPNext leave behind: its ledger entries,
+	Versions and comments, and no Deleted Document. Returns the keys to drain out of the graphs."""
+	if not frappe.db.exists(doctype, name):
+		return []
+	keys = [make_key(doctype, name)]
+	if frappe.get_meta(doctype).is_submittable:
+		if frappe.db.get_value(doctype, name, "docstatus") == 1:
+			frappe.get_doc(doctype, name).cancel()
+		for ledger in ("GL Entry", "Payment Ledger Entry"):
+			voucher = {"voucher_type": doctype, "voucher_no": name}
+			keys += [make_key(ledger, entry) for entry in frappe.get_all(ledger, voucher, pluck="name")]
+			frappe.db.delete(ledger, voucher)
+	frappe.delete_doc(doctype, name, force=True, ignore_permissions=True, delete_permanently=True)
+	delete_dynamic_links(doctype, name)  # delete_doc queues this, and the tests that use purge patch enqueue
+	feed = {"comment_type": "Deleted", "reference_doctype": doctype, "subject": f"{doctype} {name}"}
+	frappe.db.delete("Comment", feed)
+	return keys
 
 
 def delete_records(records: list, users=(), doctypes=()) -> None:
@@ -826,3 +861,324 @@ class ProfileLifecycleTests(FrappeTestCase):
 				self.assertEqual(log_error.called, bool(build_error or queue_error))
 				if queued and not queue_error:  # builds are sent on commit; `bench sync-data` won't commit
 					self.assertEqual(order.mock_calls[-2:], [call.rebuilds(), call.commit()])
+
+
+class ProfileFanOutTests(FrappeTestCase):
+	"""The drain applies each batch to every Ready profile graph. setUpClass builds two: priya's (sales,
+	no Sales Invoice; ruling R18) and meera's (accounts).
+
+	No job reaches the running worker (ruling R3): frappe.enqueue is patched, and the tests call _drain
+	and run_profile_build. _drain also writes to the site's main graph and commits, so tearDown deletes
+	every record a test made, drains that out again, and rebuilds every profile a test left Pending.
+	"""
+
+	BUILD_JOB = "eve_agent.access.profiles.run_profile_build"
+	SCHEMA_SYNC_JOB = "eve_agent.sync.schema_sync.run_schema_sync"
+	ORDER_TOTALS = "MATCH (o:`Sales Order`) RETURN count(o) AS orders, sum(o.base_grand_total) AS total"
+
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		cls.started = now_datetime()
+		cls.settings = frappe.get_single("Eve Agent Settings")
+		try:
+			get_graph_client(cls.settings).ping()
+		except Exception:
+			raise unittest.SkipTest("FalkorDB is not reachable") from None
+		cls.priya, cls.meera = seeded_user("priya"), seeded_user("meera")
+		plan = data_plan()
+		cls.sales, cls.accounts = resolve_scope(cls.priya, plan), resolve_scope(cls.meera, plan)
+		cls.keys = (cls.sales.key, cls.accounts.key)
+		if frappe.db.exists(PROFILE_DOCTYPE, {"name": ("in", cls.keys)}):
+			raise unittest.SkipTest("an access profile for priya or meera already exists on this site")
+		if frappe.db.exists("Property Setter", {"doc_type": "Sales Order", "property": "permlevel"}):
+			raise unittest.SkipTest("Sales Order already has a permlevel Property Setter")
+		fields = ("last_incremental_sync_at", "last_incremental_summary")
+		cls.saved = {field: frappe.db.get_single_value("Eve Agent Settings", field) for field in fields}
+		cls.addClassCleanup(cls.remove_profiles)
+		with patch("frappe.enqueue"), patch("frappe.publish_realtime"):
+			for scope, user in ((cls.sales, cls.priya), (cls.accounts, cls.meera)):
+				ensure_ready(scope, user)
+				run_profile_build(scope.key)
+		statuses = [frappe.db.get_value(PROFILE_DOCTYPE, key, "status") for key in cls.keys]
+		if statuses != ["Ready", "Ready"]:
+			raise AssertionError(f"the profiles were not built: {statuses}")
+
+	@classmethod
+	def remove_profiles(cls):
+		for key in cls.keys:
+			delete_profile(key)
+			frappe.cache.delete(build_flag(key))
+			feed = {
+				"comment_type": "Deleted",
+				"subject": f"{PROFILE_DOCTYPE} {key}",
+				"creation": (">=", cls.started),
+			}
+			frappe.db.delete("Comment", feed)  # delete_doc's activity feed entry
+		frappe.cache.delete_value([members.CACHE_KEY, members.UNAVAILABLE_KEY])
+		frappe.db.set_single_value("Eve Agent Settings", cls.saved)
+		frappe.db.commit()
+
+	def setUp(self):
+		self.records = []  # (doctype, name); tearDown purges them newest first and drains them out
+		self.enqueue = patch("frappe.enqueue").start()
+		patch("frappe.publish_realtime").start()
+		patch("frappe.model.document.update_global_search").start()  # no search rows for deleted records
+		self.addCleanup(patch.stopall)
+
+	def tearDown(self):
+		keys = [key for doctype, name in reversed(self.records) for key in purge(doctype, name)]
+		frappe.db.commit()
+		if keys:
+			self.drain(*keys)
+		frappe.cache.delete(frappe.cache.make_key(LAYOUT_CHANGED_KEY))  # stands in for the schema sync
+		for key in self.keys:
+			if self.status(key) != "Ready":
+				run_profile_build(key)
+			self.assertEqual(self.status(key), "Ready")
+		frappe.cache.delete(_key(FLAG_KEY))  # set by queue_keys, whose drain job never ran
+
+	def drain(self, *keys) -> str:
+		queue_keys(keys)
+		return _drain()
+
+	def status(self, key):
+		return frappe.db.get_value(PROFILE_DOCTYPE, key, "status")
+
+	def rows(self, key, cypher, **params) -> list[dict]:
+		"""`cypher` on the active graph of profile `key`, or on the main graph when `key` is None."""
+		if key:
+			graph = frappe.db.get_value(PROFILE_DOCTYPE, key, "active_graph")
+		else:
+			graph = active_data_graph(frappe.get_single("Eve Agent Settings"))
+		return get_graph_client(self.settings, graph).ro_rows(cypher, params)
+
+	def has(self, key, doctype, name) -> bool:
+		cypher = f"MATCH (n:`{doctype}` {{name: $name}}) RETURN count(n) AS n"
+		return bool(self.rows(key, cypher, name=name)[0]["n"])
+
+	def jobs(self, method, **kwargs) -> int:
+		calls = self.enqueue.call_args_list
+		return sum(c.args[0] == method and kwargs.items() <= c.kwargs.items() for c in calls)
+
+	def require_only_own_profiles(self):
+		if set(frappe.get_all(PROFILE_DOCTYPE, pluck="name")) - set(self.keys):
+			self.skipTest("other Eve Access Profiles exist on this site")
+
+	def make_order(self, submit: bool) -> str:
+		"""A Sales Order for the customer of the latest submitted one; priya and meera both read orders."""
+		template = frappe.get_last_doc("Sales Order", filters={"docstatus": 1})
+		item = template.items[0]
+		order = frappe.get_doc(
+			{
+				"doctype": "Sales Order",
+				"customer": template.customer,
+				"company": template.company,
+				"transaction_date": today(),
+				"delivery_date": add_days(today(), 7),
+				"items": [
+					{"item_code": item.item_code, "qty": 1, "rate": item.rate, "warehouse": item.warehouse}
+				],
+			}
+		).insert(ignore_permissions=True)
+		self.records.append(("Sales Order", order.name))
+		if submit:
+			order.submit()
+		return order.name
+
+	def make_invoice(self) -> str:
+		"""A submitted Sales Invoice (no stock update) like the latest one."""
+		template = frappe.get_last_doc("Sales Invoice", filters={"docstatus": 1, "is_return": 0})
+		item = template.items[0]
+		row = {"item_code": item.item_code, "qty": 1, "rate": item.rate}
+		row.update(income_account=item.income_account, cost_center=item.cost_center)
+		invoice = frappe.get_doc(
+			{
+				"doctype": "Sales Invoice",
+				"customer": template.customer,
+				"company": template.company,
+				"posting_date": today(),
+				"due_date": add_days(today(), 30),
+				"update_stock": 0,
+				"items": [row],
+			}
+		).insert(ignore_permissions=True)
+		self.records.append(("Sales Invoice", invoice.name))
+		invoice.submit()
+		return invoice.name
+
+	def add_permlevel_setter(self) -> str:
+		setter = frappe.get_doc(
+			{
+				"doctype": "Property Setter",
+				"doctype_or_field": "DocField",
+				"doc_type": "Sales Order",
+				"field_name": "po_no",
+				"property": "permlevel",
+				"value": "1",
+				"property_type": "Int",
+			}
+		).insert(ignore_permissions=True)
+		self.records.append(("Property Setter", setter.name))
+		return setter.name
+
+	def test_new_order_reaches_sales_profile(self):
+		order = self.make_order(submit=True)
+		customer = frappe.db.get_value("Sales Order", order, "customer")
+		self.drain(make_key("Sales Order", order))
+		cypher = (
+			"MATCH (o:`Sales Order` {name: $name})-[:FOR_CUSTOMER]->(c:Customer) "
+			"RETURN o.docstatus AS docstatus, c.name AS customer"
+		)
+		# The scoped business rules ran on the profile graph too: the order points at its customer.
+		self.assertEqual(
+			self.rows(self.sales.key, cypher, name=order), [{"docstatus": 1, "customer": customer}]
+		)
+
+	def test_invoice_reaches_accounts_not_sales(self):
+		invoice = self.make_invoice()
+		self.drain(make_key("Sales Invoice", invoice))
+		self.assertTrue(self.has(self.accounts.key, "Sales Invoice", invoice))
+		self.assertTrue(self.has(None, "Sales Invoice", invoice))
+		self.assertFalse(self.has(self.sales.key, "Sales Invoice", invoice))
+		invoices = self.rows(self.sales.key, "MATCH (n:`Sales Invoice`) RETURN count(n) AS n")
+		self.assertEqual(invoices, [{"n": 0}])
+
+	def test_deleted_record_leaves_profile_graph(self):
+		before = self.rows(self.sales.key, self.ORDER_TOTALS)[0]
+		order = self.make_order(submit=False)
+		value = frappe.db.get_value("Sales Order", order, "base_grand_total")
+		self.drain(make_key("Sales Order", order))
+		for key in self.keys:
+			self.assertTrue(self.has(key, "Sales Order", order))
+		during = self.rows(self.sales.key, self.ORDER_TOTALS)[0]
+		self.assertEqual(during["orders"], before["orders"] + 1)
+		self.assertAlmostEqual(during["total"], before["total"] + value, places=2)
+		self.records.remove(("Sales Order", order))
+		self.drain(*purge("Sales Order", order))
+		for key in (*self.keys, None):
+			self.assertFalse(self.has(key, "Sales Order", order))
+		after = self.rows(self.sales.key, self.ORDER_TOTALS)[0]
+		self.assertEqual(after["orders"], before["orders"])
+		self.assertAlmostEqual(after["total"], before["total"], places=2)
+
+	def test_failure_marks_profile_pending(self):
+		order = self.make_order(submit=False)
+		key = make_key("Sales Order", order)
+		broken = frappe.db.get_value(PROFILE_DOCTYPE, self.sales.key, "active_graph")
+		real = fanout.sync_keys_on_graph
+
+		def sync(settings, graph_name, keys, plan=None, reader=record_reader):
+			if graph_name == broken:
+				raise RuntimeError("FalkorDB is down")
+			return real(settings, graph_name, keys, plan, reader)
+
+		with (
+			patch("eve_agent.access.fanout.sync_keys_on_graph", sync),
+			patch("frappe.log_error") as log_error,
+		):
+			summary = self.drain(key)
+		profile = frappe.db.get_value(PROFILE_DOCTYPE, self.sales.key, ["status", "last_error"], as_dict=True)
+		self.assertEqual(profile.status, "Pending")  # its graph may now show too much
+		self.assertIn("FalkorDB is down", profile.last_error)
+		log_error.assert_called_once()
+		self.assertEqual(log_error.call_args.kwargs["reference_name"], self.sales.key)
+		self.assertEqual(self.jobs(self.BUILD_JOB, key=self.sales.key), 1)
+		self.assertIn("access profiles failed: 1", summary)
+		# The other profile still got the change, and the keys were not queued again.
+		self.assertTrue(self.has(self.accounts.key, "Sales Order", order))
+		self.assertTrue(self.has(None, "Sales Order", order))
+		self.assertFalse(frappe.cache.sismember(PENDING_KEY, key))
+
+	def test_permlevel_change_marks_pending(self):
+		self.require_only_own_profiles()
+		setter = self.add_permlevel_setter()
+		self.assertEqual(set(frappe.get_all(PROFILE_DOCTYPE, pluck="status")), {"Pending"})
+		self.assertEqual((self.jobs(self.BUILD_JOB), self.jobs(self.SCHEMA_SYNC_JOB)), (2, 1))
+		# Profile plans take field levels from the schema graph, which is old until the queued schema
+		# sync has run: until then a build would show the field again, so builds wait.
+		frappe.db.commit()
+		self.assertTrue(schema_outdated())
+		self.assertTrue(run_profile_build(self.sales.key).startswith("Skipped: waiting for the schema sync"))
+		self.assertEqual(self.status(self.sales.key), "Pending")
+		# Deleting the setter moves the field back: another schema sync.
+		self.records.remove(("Property Setter", setter))
+		purge("Property Setter", setter)
+		self.assertEqual(self.jobs(self.SCHEMA_SYNC_JOB), 2)
+
+	def test_layout_hook_conditions(self):
+		marked = patch("eve_agent.access.profiles.mark_all_pending_and_rebuild").start()
+		outdated = patch("eve_agent.access.profiles.mark_schema_outdated").start()
+
+		def doc(doctype, **values):
+			return frappe.get_doc({"doctype": doctype, **values})
+
+		setter = {"doc_type": "Sales Order", "field_name": "po_no", "value": "1"}
+		on_field_layout_change(doc("Property Setter", property="hidden", **setter))
+		self.assertEqual(marked.call_count, 0)
+		permlevel = doc("Property Setter", property="permlevel", **setter)
+		on_field_layout_change(permlevel)
+		on_field_layout_change(permlevel, "on_trash")  # once per transaction
+		self.assertEqual((marked.call_count, self.jobs(self.SCHEMA_SYNC_JOB)), (1, 1))
+		frappe.db.rollback()  # rolled back: nothing is outdated, and the next change counts again
+		outdated.assert_not_called()
+
+		field = {"dt": "Sales Order", "fieldname": "eve_test_field", "fieldtype": "Data"}
+		on_field_layout_change(doc("Custom Field", permlevel=0, **field))  # a new field at level 0
+		self.assertEqual(marked.call_count, 1)
+		on_field_layout_change(doc("Custom Field", permlevel=2, **field))
+		self.assertEqual(marked.call_count, 2)
+		frappe.db.commit()
+		outdated.assert_called_once()  # once committed
+		moved = doc("Custom Field", permlevel=0, **field)
+		moved._doc_before_save = doc("Custom Field", permlevel=1, **field)
+		on_field_layout_change(moved)
+		self.assertEqual(marked.call_count, 3)
+		frappe.db.commit()
+		on_field_layout_change(doc("DocType", name="Eve Test DocType", module="Eve Agent"), "on_trash")
+		self.assertEqual(marked.call_count, 4)
+		frappe.db.commit()
+		in_migrate = frappe.flags.in_migrate
+		frappe.flags.in_migrate = True  # the schema sync after migrate does it then
+		try:
+			on_field_layout_change(permlevel)
+		finally:
+			frappe.flags.in_migrate = in_migrate
+		self.assertEqual((marked.call_count, outdated.call_count), (4, 3))
+
+	def test_schema_sync_rebuilds_profiles_and_releases_builds(self):
+		self.require_only_own_profiles()
+		with ExitStack() as stack:
+			stack.enter_context(patch("eve_agent.sync.schema_sync.read_doctype_metas", return_value=[]))
+			imported = stack.enter_context(patch("eve_agent.sync.schema_sync.import_schema"))
+			imported.return_value.as_text.return_value = "imported"
+			stack.enter_context(patch("eve_agent.sync.schema_sync.publish_sync_done"))
+			written = stack.enter_context(patch.object(frappe.db, "set_single_value"))  # Settings stay as is
+			log_error = stack.enter_context(patch("frappe.log_error"))
+
+			mark_schema_outdated()
+			imported.side_effect = RuntimeError("FalkorDB is down")
+			run_schema_sync()  # a failed sync changes nothing
+			self.assertEqual(set(frappe.get_all(PROFILE_DOCTYPE, pluck="status")), {"Ready"})
+			self.assertEqual(self.jobs(self.BUILD_JOB), 0)
+			self.assertTrue(schema_outdated())
+
+			imported.side_effect = None
+			run_schema_sync()  # the field levels are current again, and every profile is rebuilt with them
+			self.assertFalse(schema_outdated())
+			self.assertEqual(set(frappe.get_all(PROFILE_DOCTYPE, pluck="status")), {"Pending"})
+			self.assertEqual(self.jobs(self.BUILD_JOB), 2)
+
+			# A layout change while the sync reads the metas is not in the schema graph: builds keep waiting.
+			mark_schema_outdated()
+			imported.side_effect = lambda *args: mark_schema_outdated() or DEFAULT
+			run_schema_sync()
+			self.assertTrue(schema_outdated())
+
+			imported.side_effect = None
+			log_error.reset_mock()
+			down = RuntimeError("queue is down")
+			with patch("eve_agent.access.profiles.mark_all_pending_and_rebuild", side_effect=down):
+				run_schema_sync()  # queueing the rebuilds never turns the sync into a failure
+			self.assertEqual(written.call_args.args[1]["last_sync_status"], "Success")
+			log_error.assert_called_once()

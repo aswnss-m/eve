@@ -2,7 +2,8 @@
 
 Every save, submit, cancel, rename or delete of a synced record queues its key.
 A short background job drains the queue and upserts those records into the
-active graph (eve_agent/falkor/importer/incremental.py), so a change shows up
+active graph (eve_agent/falkor/importer/incremental.py), then into every Ready
+access profile graph (eve_agent/access/fanout.py), so a change shows up
 within seconds. A 5-minute sweep queues records whose `modified` moved without a
 hook (status and outstanding updates written with db_set), and a nightly full
 rebuild heals whatever the incremental path cannot see.
@@ -22,6 +23,7 @@ from frappe.utils import add_to_date, cint, now_datetime
 from frappe.utils.file_lock import LockTimeoutError
 from frappe.utils.synchronization import filelock
 
+from eve_agent.access.fanout import apply_keys_to_profiles
 from eve_agent.falkor.importer.data_rows import DEFAULT_MODULES, EXTRA_DOCTYPES, parse_lines
 from eve_agent.falkor.importer.incremental import make_key
 from eve_agent.sync.data_sync import enqueue_data_sync, load_plan, sync_keys_on_graph
@@ -161,11 +163,15 @@ def _drain() -> str:
 			break
 		try:
 			summary = sync_keys_on_graph(settings, settings.active_data_graph or None, keys, plan)
+			# Then every Ready profile graph. A profile that fails is rebuilt instead, so its failure
+			# never queues the keys again; only a failure to mark it for rebuild does.
+			failed = apply_keys_to_profiles(settings, keys, plan)
 		except Exception:
 			frappe.cache.sadd(PENDING_KEY, *keys)
 			frappe.log_error(title="Eve Agent incremental sync failed")
 			raise
-		texts.append(summary.as_text())
+		text = summary.as_text()
+		texts.append(f"{text}, access profiles failed: {len(failed)}" if failed else text)
 		frappe.db.commit()  # Release the read snapshot so the next iteration sees newer commits.
 
 	if frappe.cache.scard(_key(PENDING_KEY)):

@@ -21,7 +21,13 @@ from eve_agent.access.reader import ProfileReader
 from eve_agent.access.scope import AccessScope, filter_plan
 from eve_agent.falkor.importer.data_rows import parse_lines
 from eve_agent.sync.data_sync import CATCH_UP_OVERLAP_SECONDS, catch_up, load_plan
-from eve_agent.sync.schema_sync import SETTINGS_DOCTYPE, get_graph_client
+from eve_agent.sync.schema_sync import (
+	SETTINGS_DOCTYPE,
+	enqueue_schema_sync,
+	get_graph_client,
+	mark_schema_outdated,
+	schema_outdated,
+)
 
 PROFILE_DOCTYPE = "Eve Access Profile"
 
@@ -174,6 +180,8 @@ def run_profile_build(key: str) -> str:
 	row = None
 	try:
 		for _ in range(BUILD_ATTEMPTS):
+			if schema_outdated():  # its field levels would be the old ones; the schema sync rebuilds it
+				return "Skipped: waiting for the schema sync after a field layout change"
 			fields = ["status", "scope_json", "active_graph", "modified"]
 			row = frappe.db.get_value(PROFILE_DOCTYPE, key, fields, as_dict=True)
 			if not row:
@@ -267,19 +275,64 @@ def ready_profiles() -> list[dict]:
 	)
 
 
-def mark_all_pending_and_rebuild() -> None:
-	"""After changes to field layouts or Eve's data settings: no profile graph is used until rebuilt.
+def mark_pending_and_rebuild(key: str, last_error: str | None = None) -> None:
+	"""No graph of profile `key` is used until it is rebuilt.
 
 	Setting the status bumps `modified`, so a build that is already running starts over."""
+	values = {"status": "Pending", "last_error": last_error} if last_error else {"status": "Pending"}
+	frappe.db.set_value(PROFILE_DOCTYPE, key, values)
+	_request_build(key)
+
+
+def mark_all_pending_and_rebuild() -> None:
+	"""After changes to field layouts or Eve's data settings: no profile graph is used until rebuilt."""
 	for key in frappe.get_all(PROFILE_DOCTYPE, pluck="name"):
-		frappe.db.set_value(PROFILE_DOCTYPE, key, "status", "Pending")
-		_request_build(key)
+		mark_pending_and_rebuild(key)
 
 
 def enqueue_profile_rebuilds() -> None:
 	"""After a main graph rebuild: Ready profiles rebuild into their other slot and stay Ready meanwhile."""
 	for key in frappe.get_all(PROFILE_DOCTYPE, {"status": "Ready"}, pluck="name"):
 		_request_build(key, restart=True)
+
+
+# --- Field layout ------------------------------------------------------------
+
+
+def on_field_layout_change(doc, method=None) -> None:
+	"""doc_events hook for Property Setter, Custom Field and DocType: a field may have moved permlevel.
+
+	Profile graphs may now hold a field their members can't read, so every profile goes Pending with
+	this save. Their plans take field levels from the schema graph, so the schema sync queued here is
+	what rebuilds them, and builds wait for it. Once per transaction. Not during install, migrate or
+	patches: the schema sync after migrate rebuilds them then."""
+	if frappe.flags.in_install or frappe.flags.in_migrate or frappe.flags.in_patch:
+		return
+	if getattr(frappe.local, "eve_layout_changed", False) or not _changes_field_layout(doc):
+		return
+	frappe.local.eve_layout_changed = True
+	frappe.db.after_commit.add(_layout_change_committed)  # added first: runs before the builds are sent
+	frappe.db.after_rollback.add(_end_layout_change)
+	mark_all_pending_and_rebuild()
+	enqueue_schema_sync()
+
+
+def _changes_field_layout(doc) -> bool:
+	if doc.doctype == "Property Setter":
+		return doc.get("property") == "permlevel"
+	if doc.doctype == "Custom Field":  # a level set, or changed (moved back to 0, say)
+		level, before = cint(doc.get("permlevel")), doc.get_doc_before_save()
+		return bool(level) or bool(before and cint(before.get("permlevel")) != level)
+	return True
+
+
+def _layout_change_committed() -> None:
+	_end_layout_change()
+	mark_schema_outdated()
+
+
+def _end_layout_change() -> None:
+	frappe.local.eve_layout_changed = False
 
 
 # --- Clean-up ----------------------------------------------------------------
