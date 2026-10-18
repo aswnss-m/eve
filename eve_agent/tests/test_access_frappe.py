@@ -1098,6 +1098,7 @@ class ProfileFanOutTests(FrappeTestCase):
 
 	def test_rebuild_and_fan_out_use_live_field_levels(self):
 		"""No schema sync runs here: the schema graph still has delivery_date at level 0."""
+		self.require_only_own_profiles()
 		dated = "MATCH (o:`Sales Order`) WHERE o.delivery_date IS NOT NULL RETURN count(o) AS n"
 		cypher = "MATCH (o:`Sales Order` {name: $name}) RETURN o.delivery_date AS delivery_date"
 		self.assertGreater(self.rows(self.sales.key, dated)[0]["n"], 0)
@@ -1117,6 +1118,34 @@ class ProfileFanOutTests(FrappeTestCase):
 		self.records.remove(("Property Setter", setter))
 		purge("Property Setter", setter)
 		self.assertEqual(set(frappe.get_all(PROFILE_DOCTYPE, pluck="status")), {"Pending"})
+
+	def test_build_ignores_meta_kept_by_the_process(self):
+		"""A job keeps get_meta results in frappe.local.cache, and a change in another process only clears
+		Redis: e.g. a build attempt restarting in the same job after a permlevel change."""
+		self.require_only_own_profiles()
+		old = frappe.get_meta("Sales Order")
+		self.add_permlevel_setter()
+		frappe.local.cache.setdefault(frappe.cache.make_key("doctype_meta"), {})["Sales Order"] = old
+		self.assertEqual(frappe.get_meta("Sales Order").get_field("delivery_date").permlevel, 0)  # stale
+		run_profile_build(self.sales.key)
+		dated = "MATCH (o:`Sales Order`) WHERE o.delivery_date IS NOT NULL RETURN count(o) AS n"
+		self.assertEqual(self.rows(self.sales.key, dated), [{"n": 0}])
+
+	def test_fan_out_without_field_levels_marks_every_profile_pending(self):
+		self.require_only_own_profiles()
+		order = self.make_order(submit=False)
+		key = make_key("Sales Order", order)
+		failing = patch("eve_agent.access.fanout.with_live_field_levels", side_effect=RuntimeError("no meta"))
+		with failing, patch("frappe.log_error") as log_error:
+			summary = self.drain(key)
+		profiles = frappe.get_all(PROFILE_DOCTYPE, fields=["status", "last_error"])
+		self.assertEqual({profile.status for profile in profiles}, {"Pending"})  # none got the batch
+		self.assertTrue(all("no meta" in profile.last_error for profile in profiles))
+		log_error.assert_called_once()
+		self.assertEqual(self.jobs(self.BUILD_JOB), 2)
+		self.assertIn("access profiles failed: 2", summary)
+		self.assertTrue(self.has(None, "Sales Order", order))  # the main graph's update stands
+		self.assertFalse(frappe.cache.sismember(PENDING_KEY, key))
 
 	def test_live_field_levels_drop_unknown_fields(self):
 		plan = data_plan()

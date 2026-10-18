@@ -21,6 +21,9 @@ def with_live_field_levels(plan: DataPlan) -> DataPlan:
 	"""`plan` with each field's permlevel from Frappe's current meta rather than the schema graph, which
 	only a schema sync updates: a field just moved to a higher permlevel is filtered out at once. A field
 	the meta no longer has is dropped (fail closed). Use it before every filter_plan for a profile."""
+	# get_meta memoises in frappe.local.cache for the whole job (RedisWrapper.hget), and a change in another
+	# process only clears Redis: a build restarting after a permlevel change would read the old levels.
+	frappe.local.cache.pop(frappe.cache.make_key("doctype_meta"), None)
 	return DataPlan(
 		parents=[_live_levels(p) for p in plan.parents],
 		children={name: _live_levels(child) for name, child in plan.children.items()},
